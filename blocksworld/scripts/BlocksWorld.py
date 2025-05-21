@@ -101,9 +101,7 @@ class BlocksWorldGenerator:
 
         return actions
 
-    def apply_action(
-        self, state: BlockState, action: Tuple[str, str, str]
-    ) -> BlockState:
+    def apply_action(self, state: BlockState, action: Tuple[str, str, str]) -> BlockState:
         """Apply action to state following PDDL effects"""
         new_state = state.copy()
         action_type, ob, underob = action

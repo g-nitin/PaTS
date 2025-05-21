@@ -39,15 +39,11 @@ def display_single_plan_details(generator: BlocksWorldGenerator, plan_data: dict
     decoded_initial_map = generator.decode_vector(initial_state_tensor)
     # Log feature map at DEBUG level as it can be verbose
     logger.debug(f"Initial State (feature map):\n{pformat(decoded_initial_map)}")
-    logger.info(
-        f"Initial State (decoded):\n{pformat(generator.decode_state(decoded_initial_map))}"
-    )
+    logger.info(f"Initial State (decoded):\n{pformat(generator.decode_state(decoded_initial_map))}")
 
     decoded_goal_map = generator.decode_vector(goal_state_tensor)
     logger.debug(f"Goal State (feature map):\n{pformat(decoded_goal_map)}")
-    logger.info(
-        f"Goal State (decoded):\n{pformat(generator.decode_state(decoded_goal_map))}"
-    )
+    logger.info(f"Goal State (decoded):\n{pformat(generator.decode_state(decoded_goal_map))}")
 
     logger.info("Plan Actions:")
     # Log actions one by one for better readability if many
@@ -82,9 +78,7 @@ def generate_and_save_dataset(
     # could be removed or made conditional within BlocksWorldGenerator.
     dataset = generator.generate_dataset(num_plans=num_plans)
 
-    logger.success(
-        f"Dataset generation complete. Generated {len(dataset['plans'])} plans."
-    )
+    logger.success(f"Dataset generation complete. Generated {len(dataset['plans'])} plans.")
     logger.info(
         f"Each state in the dataset is encoded with {dataset['num_features']} binary features."
     )
@@ -108,9 +102,7 @@ def generate_and_save_dataset(
         except IOError as e:
             logger.error(f"Failed to save dataset to {output_path}: {e}")
     else:
-        logger.info(
-            "No output file specified. Dataset will be generated but not saved to disk."
-        )
+        logger.info("No output file specified. Dataset will be generated but not saved to disk.")
         if dataset["plans"] and logger.level("DEBUG").no >= logger.level("INFO").no:
             logger.debug(
                 f"First plan in generated dataset (not saved):\n{pformat(dataset['plans'][0])}"
@@ -190,23 +182,16 @@ def main():
         torch.manual_seed(args.seed)
 
     try:
-        logger.debug(
-            f"Initializing BlocksWorldGenerator for {args.num_blocks} blocks..."
-        )
+        logger.debug(f"Initializing BlocksWorldGenerator for {args.num_blocks} blocks...")
         generator = BlocksWorldGenerator(num_blocks=args.num_blocks)
-        logger.info(
-            f"BlocksWorldGenerator initialized successfully with {args.num_blocks} blocks."
-        )
+        logger.info(f"BlocksWorldGenerator initialized successfully with {args.num_blocks} blocks.")
         logger.debug(f"Number of features for encoding: {len(generator.feature_names)}")
 
         if args.show_features:
             logger.info("** Feature Names (index -> name) **")
             # Log as a multi-line string within a single log entry for better readability
             feature_list_str = "\n" + "\n".join(
-                [
-                    f"  {i}: {feature}"
-                    for i, feature in enumerate(generator.feature_names)
-                ]
+                [f"  {i}: {feature}" for i, feature in enumerate(generator.feature_names)]
             )
             logger.info(feature_list_str)
             logger.info("** End of Feature Names **")
@@ -225,9 +210,7 @@ def main():
                 )
 
         elif args.mode == "dataset":
-            logger.info(
-                f"Operating in 'dataset' generation mode for {args.num_plans} plans."
-            )
+            logger.info(f"Operating in 'dataset' generation mode for {args.num_plans} plans.")
 
             actual_output_file_str = args.output_file
             if actual_output_file_str is None:  # Not specified by user
@@ -241,9 +224,7 @@ def main():
 
             if actual_output_file_str and actual_output_file_str.upper() == "NONE":
                 actual_output_file_str = None
-                logger.info(
-                    "Dataset will be generated but not saved as per '--output-file NONE'."
-                )
+                logger.info("Dataset will be generated but not saved as per '--output-file NONE'.")
 
             generate_and_save_dataset(generator, args.num_plans, actual_output_file_str)
 

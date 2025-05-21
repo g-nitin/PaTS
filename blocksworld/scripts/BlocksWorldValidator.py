@@ -58,9 +58,7 @@ class BlocksWorldValidator:
 
         # Check state vector size
         if len(state) != self.state_size:
-            violations.append(
-                f"Invalid state size: expected {self.state_size}, got {len(state)}"
-            )
+            violations.append(f"Invalid state size: expected {self.state_size}, got {len(state)}")
             return False, violations
 
         blocks = [chr(ord("A") + i) for i in range(self.num_blocks)]
@@ -79,19 +77,13 @@ class BlocksWorldValidator:
                 positions += 1
 
             if positions == 0:
-                violations.append(
-                    f"Block {block} is floating (not on any surface or held)"
-                )
+                violations.append(f"Block {block} is floating (not on any surface or held)")
             elif positions > 1:
-                violations.append(
-                    f"Block {block} is in multiple positions simultaneously"
-                )
+                violations.append(f"Block {block} is in multiple positions simultaneously")
 
             # Check for cycles in stacking
             if self._has_cycle(state, block, set()):
-                violations.append(
-                    f"Found cycle in block stacking involving block {block}"
-                )
+                violations.append(f"Found cycle in block stacking involving block {block}")
 
             # Check clear status consistency
             if state[self.clear_indices[block]] == 1:
@@ -145,15 +137,11 @@ class BlocksWorldValidator:
         if differences == 0:
             violations.append("No change between states")
         elif differences > 4:
-            violations.append(
-                f"Too many changes between states ({differences} bits changed)"
-            )
+            violations.append(f"Too many changes between states ({differences} bits changed)")
 
         return len(violations) == 0, violations
 
-    def validate_sequence(
-        self, states: List[List[int]], goal_state: List[int]
-    ) -> ValidationResult:
+    def validate_sequence(self, states: List[List[int]], goal_state: List[int]) -> ValidationResult:
         """Validate a complete sequence of states leading to a goal"""
         all_violations = []
         metrics = {}
@@ -167,13 +155,9 @@ class BlocksWorldValidator:
 
             # Check transition from previous state
             if i > 0:
-                valid, violations = self._check_legal_transition(
-                    states[i - 1], states[i]
-                )
+                valid, violations = self._check_legal_transition(states[i - 1], states[i])
                 if not valid:
-                    all_violations.extend(
-                        [f"Transition {i - 1}->{i}: {v}" for v in violations]
-                    )
+                    all_violations.extend([f"Transition {i - 1}->{i}: {v}" for v in violations])
 
         # Check if goal is reached
         if not np.array_equal(states[-1], goal_state):
@@ -231,9 +215,7 @@ class BlocksWorldValidator:
                 total_changes += result.metrics["avg_changes_per_step"]
 
             # Check for exact match with target sequence
-            if len(pred) == len(target) and all(
-                np.array_equal(p, t) for p, t in zip(pred, target)
-            ):
+            if len(pred) == len(target) and all(np.array_equal(p, t) for p, t in zip(pred, target)):
                 exact_matches += 1
 
         # Calculate final metrics

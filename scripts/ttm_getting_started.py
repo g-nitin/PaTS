@@ -78,9 +78,7 @@ CONTEXT_LENGTH = 512
 PREDICTION_LENGTH = 96
 
 TARGET_DATASET = "etth1"
-dataset_path = (
-    "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTh1.csv"
-)
+dataset_path = "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTh1.csv"
 
 
 # Results dir
@@ -92,9 +90,7 @@ OUT_DIR = "ttm_finetuned_models/"
 # %%
 # Dataset
 TARGET_DATASET = "etth1"
-dataset_path = (
-    "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTh1.csv"
-)
+dataset_path = "https://raw.githubusercontent.com/zhouhaoyi/ETDataset/main/ETT-small/ETTh1.csv"
 timestamp_column = "date"
 id_columns = []  # mention the ids that uniquely identify a time-series.
 
@@ -320,9 +316,7 @@ def fewshot_finetune_eval(
         save_strategy="epoch",
         logging_strategy="epoch",
         save_total_limit=1,
-        logging_dir=os.path.join(
-            out_dir, "logs"
-        ),  # Make sure to specify a logging directory
+        logging_dir=os.path.join(out_dir, "logs"),  # Make sure to specify a logging directory
         load_best_model_at_end=True,  # Load the best model when training ends
         metric_for_best_model="eval_loss",  # Metric to monitor for early stopping
         greater_is_better=False,  # For loss
@@ -431,9 +425,7 @@ fewshot_finetune_eval(
 # ### Zero-shot
 
 # %%
-zeroshot_eval(
-    dataset_name=TARGET_DATASET, context_length=1024, forecast_length=48, batch_size=64
-)
+zeroshot_eval(dataset_name=TARGET_DATASET, context_length=1024, forecast_length=48, batch_size=64)
 
 # %% [markdown]
 # ### Few-shot 5%

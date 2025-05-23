@@ -22,3 +22,27 @@
         ```bash
         python generate_plans.py --help
         ```
+
+- `ttm_trainer.py`:
+
+    To use this script:
+
+    -   Example for training:
+        ```bash
+        python blocksworld/scripts/ttm_trainer.py train \
+            --dataset_file blocksworld/data/dataset_3.json \
+            --output_dir blocksworld/outputs/training_output_bw3 \
+            --num_epochs 20 \
+            --batch_size 16 \
+            --learning_rate 0.0001 \
+            --log_level DEBUG
+        ```
+
+    - Example for evaluation:
+        ```bash
+        python blocksworld/scripts/ttm_trainer.py evaluate \
+            --dataset_file blocksworld/data/dataset_3.json \
+            --output_dir blocksworld/outputs/evaluation_output_bw3 \
+            --model_load_path blocksworld/outputs/training_output_bw3/final_model_assets \
+            --log_level INFO
+        ```

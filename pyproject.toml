@@ -10,7 +10,7 @@ dependencies = [
     "loguru>=0.7.3",
     "numpy>=2.2.5",
     "torch>=2.7.0",
-    "transformers>=4.52.2",
+    "transformers>=4.52.3",
 ]
 
 [dependency-groups]
@@ -19,7 +19,7 @@ dev = [
 ]
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 
 [tool.ruff.format]
 # Like Black, use double quotes for strings.

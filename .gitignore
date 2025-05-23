@@ -7,3 +7,4 @@ blocksworld/models
 blocksworld/data
 blocksworld/scripts/blocks_world_ttm/
 ttm_finetuned_models/
+outputs/

@@ -5,7 +5,7 @@ import posixpath
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from pathlib import Path, PosixPath, PurePosixPath
+from pathlib import Path, PosixPath
 from pprint import pformat
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -106,59 +106,71 @@ class BlocksWorldDataset(Dataset):
         plan_states_np = np.array(sample.plan, dtype=np.float32)  # shape (plan_len, state_dim)
         goal_state_np = np.array(sample.goal_state, dtype=np.float32)  # shape (state_dim,)
         plan_len = len(sample.plan)
+        initial_state_np = plan_states_np[0]  # Assuming plan always includes initial state
 
         # Past values and mask
         past_values_np = np.zeros((self.context_length, self.state_dim), dtype=np.float32)
         past_observed_mask_np = np.zeros((self.context_length, self.state_dim), dtype=np.float32)
 
-        # How many actual plan steps can go into context
-        len_from_plan_for_past = min(plan_len, self.context_length)
-        past_values_np[:len_from_plan_for_past] = plan_states_np[:len_from_plan_for_past]
-        past_observed_mask_np[:len_from_plan_for_past, :] = 1.0
+        # Number of actual plan steps to copy into the context window
+        num_plan_steps_for_context = 0
+        if plan_len > 0:  # Only proceed if there are plan steps
+            num_plan_steps_for_context = min(plan_len, self.context_length)
 
-        # Fill remaining past_values with padding (e.g., last valid state or goal state)
-        # If using goal_state for padding context...
-        if len_from_plan_for_past < self.context_length:
-            num_past_padding = self.context_length - len_from_plan_for_past
-            padding_values = np.tile(goal_state_np, (num_past_padding, 1))
-            past_values_np[len_from_plan_for_past:] = padding_values
-            # Mask for these padded values remains 0
+        if num_plan_steps_for_context > 0:
+            # Copy the actual plan steps
+            past_values_np[:num_plan_steps_for_context] = plan_states_np[:num_plan_steps_for_context]
+            past_observed_mask_np[:num_plan_steps_for_context, :] = 1.0
+
+            # If padding is needed for the rest of the context window
+            if num_plan_steps_for_context < self.context_length:
+                # Pad with the *last observed state* from the plan segment that fit into the context
+                last_observed_state_in_context = plan_states_np[num_plan_steps_for_context - 1]
+                num_past_padding = self.context_length - num_plan_steps_for_context
+
+                padding_values = np.tile(last_observed_state_in_context, (num_past_padding, 1))
+                past_values_np[num_plan_steps_for_context:] = padding_values
+                # The mask for these padded values (past_observed_mask_np[num_plan_steps_for_context:]) correctly remains 0.0 as initialized.
+        else:
+            if self.context_length > 0:
+                # Pad with a neutral value, e.g., the initial state if available and meaningful, or zeros.
+                padding_values = np.tile(initial_state_np, (self.context_length, 1))
+                past_values_np[:] = padding_values
 
         # Future values and mask
         future_values_np = np.zeros((self.prediction_length, self.state_dim), dtype=np.float32)
         future_observed_mask_np = np.zeros((self.prediction_length, self.state_dim), dtype=np.float32)
 
-        # How many actual plan steps can go into future (after context)
-        # These are sample.plan[self.context_length:]
-        actual_future_steps_from_plan = plan_states_np[self.context_length :]
-        len_from_plan_for_future = min(len(actual_future_steps_from_plan), self.prediction_length)
+        # Actual plan steps that fall into the future window
+        # These are states from the original plan starting from index self.context_length
+        target_future_plan_states = []
+        if plan_len > self.context_length:
+            target_future_plan_states = plan_states_np[self.context_length :]
 
-        if len_from_plan_for_future > 0:
-            future_values_np[:len_from_plan_for_future] = actual_future_steps_from_plan[:len_from_plan_for_future]
-            future_observed_mask_np[:len_from_plan_for_future, :] = 1.0
+        num_actual_future_steps_from_plan = len(target_future_plan_states)
+        len_to_copy_to_future = min(num_actual_future_steps_from_plan, self.prediction_length)
+
+        if len_to_copy_to_future > 0:
+            future_values_np[:len_to_copy_to_future] = target_future_plan_states[:len_to_copy_to_future]
+            future_observed_mask_np[:len_to_copy_to_future, :] = 1.0
 
         # Fill remaining future_values with goal_state padding
-        if len_from_plan_for_future < self.prediction_length:
-            num_future_padding = self.prediction_length - len_from_plan_for_future
+        if len_to_copy_to_future < self.prediction_length:
+            num_future_padding = self.prediction_length - len_to_copy_to_future
             padding_values = np.tile(goal_state_np, (num_future_padding, 1))
-            future_values_np[len_from_plan_for_future:] = padding_values
-            # Mask for these padded values is set to 1.0 to enforce goal prediction
-            # and to prevent issues with empty tensors in loss calculation on MPS if mask is all zeros.
-            future_observed_mask_np[len_from_plan_for_future:, :] = (
-                1.0  # To enforce goal prediction & for MPS compatibility
-                # 0.0  # To ignore loss on goal prediction (caused MPS error so unused)
-            )
+            future_values_np[len_to_copy_to_future:] = padding_values
+            future_observed_mask_np[len_to_copy_to_future:, :] = 1.0  # Enforce goal prediction
 
         # Static categorical values (goal state)
         static_categorical_values_np = goal_state_np
 
         return {
+            "freq_token": torch.zeros(1, dtype=torch.long).to(DEVICE),
             "past_values": torch.tensor(past_values_np, dtype=torch.float32).to(DEVICE),
             "future_values": torch.tensor(future_values_np, dtype=torch.float32).to(DEVICE),
             "past_observed_mask": torch.tensor(past_observed_mask_np, dtype=torch.float32).to(DEVICE),
             "future_observed_mask": torch.tensor(future_observed_mask_np, dtype=torch.float32).to(DEVICE),
             "static_categorical_values": torch.tensor(static_categorical_values_np, dtype=torch.float32).to(DEVICE),
-            "freq_token": torch.zeros(1, dtype=torch.long).to(DEVICE),
         }
 
 

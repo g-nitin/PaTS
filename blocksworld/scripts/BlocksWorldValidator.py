@@ -112,28 +112,18 @@ class BlocksWorldValidator:
         return False
 
     def _check_legal_transition(self, state1: List[int], state2: List[int]) -> Tuple[bool, List[str]]:
-        """Check if transition between states is legal according to blocks world rules"""
+        """Check if transition between states is legal according to blocks world rules.
+        Assumes state1 and state2 are individually physically valid."""
         violations = []
-
-        # First check both states are valid
-        valid1, v1 = self._check_physical_constraints(state1)
-        valid2, v2 = self._check_physical_constraints(state2)
-        if not valid1:
-            violations.extend([f"Initial state invalid: {v}" for v in v1])
-            return False, violations
-        if not valid2:
-            violations.extend([f"Final state invalid: {v}" for v in v2])
-            return False, violations
-
-        # Count differences between states
         differences = sum(1 for a, b in zip(state1, state2) if a != b)
 
-        # Legal moves involve picking up or putting down one block
-        # This should change 2-4 bits in the state vector
         if differences == 0:
             violations.append("No change between states")
-        elif differences > 4:
-            violations.append(f"Too many changes between states ({differences} bits changed)")
+        # A single action (pickup, putdown, stack, unstack) changes 3 or 4 features.
+        elif differences < 3 or differences > 4:
+            violations.append(
+                f"Illegal number of changes ({differences} bits changed). Expected 3 or 4 for a single action, or 0 if at goal."
+            )
 
         return len(violations) == 0, violations
 
@@ -142,30 +132,73 @@ class BlocksWorldValidator:
         all_violations = []
         metrics = {}
 
-        # Check each state and transition
-        for i in range(len(states)):
-            # Check current state
-            valid, violations = self._check_physical_constraints(states[i])
-            if not valid:
-                all_violations.extend([f"State {i}: {v}" for v in violations])
+        if not states:
+            all_violations.append("Predicted sequence is empty.")
+            # Assuming empty sequence doesn't achieve a typical BlocksWorld goal.
+            # If goal_state could represent an "empty" or initial state, this might need adjustment.
+            # For now, if sequence is empty, goal is not achieved unless goal_state is also somehow "empty".
+            # is_empty_goal = not np.any(goal_state)  # Simplistic check if goal is all zeros (e.g. -1 after scaling)
+            # Or, more robustly, define what an "empty" goal means.
+            # For this problem, goal_state is unlikely to be "empty" in a way that matches an empty plan.
 
-            # Check transition from previous state
-            if i > 0:
-                valid, violations = self._check_legal_transition(states[i - 1], states[i])
-                if not valid:
-                    all_violations.extend([f"Transition {i - 1}->{i}: {v}" for v in violations])
+            metrics["sequence_length"] = 0
+            metrics["goal_achievement"] = 0.0  # Default for empty sequence
+            metrics["avg_changes_per_step"] = 0.0
+            return ValidationResult(is_valid=len(all_violations) == 0, violations=all_violations, metrics=metrics)
 
-        # Check if goal is reached
-        if not np.array_equal(states[-1], goal_state):
-            all_violations.append("Final state does not match goal state")
+        # 1. Validate all states individually for physical constraints
+        for i, state_vector in enumerate(states):
+            is_physically_valid, physical_violations = self._check_physical_constraints(state_vector)
+            if not is_physically_valid:
+                all_violations.extend([f"State {i} physically invalid: {v}" for v in physical_violations])
 
-        # Calculate metrics
+        # If any state is physically invalid, the sequence is fundamentally flawed.
+        if all_violations:
+            metrics["sequence_length"] = len(states)
+            metrics["goal_achievement"] = 0.0
+            metrics["avg_changes_per_step"] = 0.0  # Not meaningful if states are invalid
+            return ValidationResult(is_valid=False, violations=all_violations, metrics=metrics)
+
+        # 2. All states are physically valid. Now check transitions.
+        for i in range(1, len(states)):
+            # Note: _check_legal_transition now assumes states are physically valid.
+            valid_transition, transition_violations_list = self._check_legal_transition(states[i - 1], states[i])
+
+            if not valid_transition:
+                is_acceptable_no_change = False
+                # Check if the only violation is "No change between states" AND the state is the goal state
+                if "No change between states" in transition_violations_list:
+                    if np.array_equal(states[i - 1], goal_state):  # If the state that didn't change is the goal
+                        # And "No change" is the *only* violation from _check_legal_transition
+                        if (
+                            len(transition_violations_list) == 1
+                            and transition_violations_list[0] == "No change between states"
+                        ):
+                            is_acceptable_no_change = True
+
+                if not is_acceptable_no_change:
+                    all_violations.extend([f"Transition {i - 1}->{i}: {v}" for v in transition_violations_list])
+
+        # 3. Check if the final state of the sequence matches the goal state
+        final_state_is_goal = np.array_equal(states[-1], goal_state)
+        if not final_state_is_goal:
+            # Avoid overly verbose goal state printing if it's long
+            # final_state_str = str(states[-1][:10]) + "..." if len(states[-1]) > 10 else str(states[-1])
+            # goal_state_str = str(goal_state[:10]) + "..." if len(goal_state) > 10 else str(goal_state)
+            all_violations.append("Final state does not match goal state.")
+
+        # Populate metrics
         metrics["sequence_length"] = len(states)
-        metrics["goal_achievement"] = float(np.array_equal(states[-1], goal_state))
+        metrics["goal_achievement"] = float(final_state_is_goal)
+
         if len(states) > 1:
-            metrics["avg_changes_per_step"] = np.mean(
-                [sum(1 for a, b in zip(states[i], states[i + 1]) if a != b) for i in range(len(states) - 1)]
-            )
+            sum_changes_for_avg = 0
+            for i_tc in range(len(states) - 1):
+                diff_count = sum(1 for a, b in zip(states[i_tc], states[i_tc + 1]) if a != b)
+                sum_changes_for_avg += diff_count
+            metrics["avg_changes_per_step"] = sum_changes_for_avg / (len(states) - 1)
+        else:  # single state sequence
+            metrics["avg_changes_per_step"] = 0.0
 
         return ValidationResult(
             is_valid=len(all_violations) == 0,

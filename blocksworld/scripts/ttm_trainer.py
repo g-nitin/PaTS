@@ -1,4 +1,3 @@
-from pprint import pprint
 import argparse
 import json
 import math
@@ -789,7 +788,7 @@ def analyze_error_patterns(model: BlocksWorldTTM, test_dataset: Dataset, num_blo
         logger.info(f"  Error Pos (Final State): {case_data['error_positions_in_final_state']}")
         logger.info(f"  Predicted Sequence Valid: {case_data['is_predicted_sequence_valid']}")
         if not case_data["is_predicted_sequence_valid"]:
-            logger.info(f"  Violations:\n{pprint(case_data['predicted_sequence_violations'])}")
+            logger.info(f"  Violations:\n{pformat(case_data['predicted_sequence_violations'])}")
     return analysis
 
 
@@ -1114,8 +1113,8 @@ def main_overfit():
             logger.info(f"  Loss for its batch (from model): {data_item['loss_for_this_batch_from_model']:.6f}")
             logger.info(f"  Is Perfect Masked Match with Target: {data_item['is_perfect_masked_match']}")
             logger.info(f"  Is Predicted Sequence Valid (Validator): {data_item['is_pred_sequence_valid']}")
-            if not data_item["is_pred_sequence_valid"]:
-                logger.info(f"  Violations:\n{pprint(data_item['pred_sequence_violations'])}")
+            if not data_item["is_pred_sequence_valid"]:  # Only print violations if not valid
+                logger.info(f"  Violations:\n{pformat(data_item['pred_sequence_violations'])}")
 
             # To make printing manageable, let's look at a few time steps and a few features
             # for the 'full' arrays. For 'masked' arrays, they might already be small.
@@ -1378,4 +1377,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main_overfit()
+    main()

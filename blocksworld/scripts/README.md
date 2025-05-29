@@ -32,7 +32,7 @@
         python blocksworld/scripts/ttm_trainer.py train \
             --dataset_file blocksworld/data/dataset_3.json \
             --output_dir blocksworld/outputs/training_output_bw3 \
-            --num_epochs 20 \
+            --num_epochs 50 \
             --batch_size 16 \
             --learning_rate 0.0001 \
             --log_level DEBUG

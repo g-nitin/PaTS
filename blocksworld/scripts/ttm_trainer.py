@@ -1,3 +1,4 @@
+from pprint import pprint
 import argparse
 import json
 import math
@@ -11,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from BlocksWorldValidator import BlocksWorldValidator
 from loguru import logger
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
@@ -550,9 +552,9 @@ def prepare_datasets(
     return train_dataset, val_dataset, test_dataset
 
 
-def evaluate_model(model: BlocksWorldTTM, test_dataset) -> Dict[str, Any]:
-    """Comprehensive evaluation of the model with more detailed metrics"""
-    logger.info("Starting model evaluation on test set...")
+def evaluate_model(model: BlocksWorldTTM, test_dataset, num_blocks: int) -> Dict[str, Any]:
+    """Comprehensive evaluation of the model using BlocksWorldValidator."""
+    logger.info("Starting model evaluation on test set with BlocksWorldValidator...")
     if model.model is None:
         logger.error("Model not loaded or trained in BlocksWorldTTM instance.")
         return {}
@@ -563,86 +565,88 @@ def evaluate_model(model: BlocksWorldTTM, test_dataset) -> Dict[str, Any]:
         logger.warning("Test dataset is empty. Skipping evaluation.")
         return {"num_samples": 0}
 
-    num_exact_matches = 0
-    num_partial_matches = 0
-    total_bits_correct = 0
-    total_bits = 0
+    validator = BlocksWorldValidator(num_blocks=num_blocks)
+    all_predicted_sequences_01_list = []
+    all_target_sequences_01_list = []  # from sample["future_values"]
+    all_goal_states_01_list = []  # from sample["future_values"][-1] or sample["static_categorical_values"]
 
     with torch.no_grad():
         for i in range(num_samples):
-            sample = test_dataset[i]
+            sample = test_dataset[i]  # Data from BlocksWorldDataset is already -1/1
 
-            # Get initial and goal states
-            initial_state = sample["past_values"][0]
-            goal_state = sample["static_categorical_values"]  # This is already -1/1
-            target = sample["future_values"]  # This is already -1/1
+            initial_state_m11 = sample["past_values"][0]  # (state_dim,)
+            goal_state_m11_from_static = sample["static_categorical_values"]  # (state_dim,)
+            target_sequence_m11 = sample["future_values"]  # (prediction_length, state_dim)
 
             # Create context sequence
-            context_sequence = initial_state.unsqueeze(0).repeat(
-                1, model.config.context_length, 1
-            )  # initial_state is -1/1
+            context_sequence_m11 = initial_state_m11.unsqueeze(0).repeat(1, model.config.context_length, 1)
 
-            # Prepare inputs
             inputs = {
-                "past_values": context_sequence.to(model.device),  # context_sequence is -1/1
-                "past_observed_mask": torch.ones_like(context_sequence).to(model.device),
-                "static_categorical_values": goal_state.unsqueeze(0).to(model.device),  # goal_state is -1/1
+                "past_values": context_sequence_m11.to(model.device),
+                "past_observed_mask": torch.ones_like(context_sequence_m11).to(model.device),
+                "static_categorical_values": goal_state_m11_from_static.unsqueeze(0).to(model.device),
                 "freq_token": torch.zeros(1, dtype=torch.long).to(model.device),
             }
 
-            # Get prediction
             outputs = model.model(**inputs)
-            raw_logits = outputs[0]
+            raw_logits = outputs[0]  # (1, prediction_length, num_features)
             predictions_tanh = torch.tanh(raw_logits)
-            prediction_scaled_binary = torch.where(
+            prediction_scaled_binary_m11 = torch.where(
                 predictions_tanh > 0, torch.tensor(1.0, device=model.device), torch.tensor(-1.0, device=model.device)
             )
 
-            # target is already scaled from the dataset
-            target_scaled = target.to(model.device)
+            # Convert predicted sequence from -1/1 tensor to list of lists of 0/1 ints
+            pred_seq_np_m11 = prediction_scaled_binary_m11.squeeze(0).cpu().numpy()
+            pred_seq_01 = [((step + 1.0) / 2.0).astype(int).tolist() for step in pred_seq_np_m11]
+            all_predicted_sequences_01_list.append(pred_seq_01)
 
-            # Focus on goal states (final states) in -1/1 space
-            pred_goal_scaled = prediction_scaled_binary[0, -1]  # Last step of prediction
-            true_goal_scaled = target_scaled[-1]  # Last step of target (should be goal if padded)
+            # Convert target sequence from -1/1 tensor to list of lists of 0/1 ints
+            target_seq_np_m11 = target_sequence_m11.cpu().numpy()
+            target_seq_01 = [((step + 1.0) / 2.0).astype(int).tolist() for step in target_seq_np_m11]
+            all_target_sequences_01_list.append(target_seq_01)
 
-            # goal_state_predictions.append(pred_goal)
-            # goal_state_targets.append(true_goal)
+            # The actual goal state for validation should be the one used to generate the plan.
+            # This is represented by goal_state_m11_from_static or the last element of target_sequence_m11
+            # if future_observed_mask for that last step is 1 and it's indeed the goal.
+            # Using goal_state_m11_from_static is safer as it's explicitly the goal.
+            goal_np_m11 = goal_state_m11_from_static.cpu().numpy()
+            goal_01 = ((goal_np_m11 + 1.0) / 2.0).astype(int).tolist()
+            all_goal_states_01_list.append(goal_01)
 
-            # Calculate exact matches
-            if torch.all(pred_goal_scaled == true_goal_scaled):
-                num_exact_matches += 1
+    metrics: Dict[str, Any]
+    if num_samples > 0:
+        logger.info(f"Using {num_blocks} blocks for validator.")
+        validator_metrics = validator.compute_performance_metrics(
+            predictions=all_predicted_sequences_01_list,
+            targets=all_target_sequences_01_list,  # Pass the ground truth sequences
+            goal_states=all_goal_states_01_list,
+        )
+        validator_metrics["num_samples"] = num_samples
+        metrics = validator_metrics
+    else:
+        metrics = {
+            "valid_sequence_rate": 0.0,
+            "goal_achievement_rate": 0.0,
+            "avg_sequence_length": 0.0,
+            "avg_changes_per_step": 0.0,
+            "exact_match_rate": 0.0,
+            "num_samples": 0,
+        }
 
-            # Calculate partial matches (more than 50% bits correct)
-            num_correct_bits = torch.sum(pred_goal_scaled == true_goal_scaled).item()
-            total_bits_correct += num_correct_bits
-            total_bits += len(pred_goal_scaled)
-
-            if num_correct_bits > len(pred_goal_scaled) / 2:
-                num_partial_matches += 1
-
-    # Calculate metrics
-    metrics = {
-        "num_samples": num_samples,
-        "num_exact_matches": num_exact_matches,
-        "exact_match_rate": num_exact_matches / num_samples,
-        "num_partial_matches": num_partial_matches,  # >50% correct
-        "partial_match_rate": num_partial_matches / num_samples,
-        "bit_accuracy": total_bits_correct / total_bits,
-    }
-
-    logger.info("Detailed Model Evaluation Metrics:")
+    logger.info("Detailed Model Evaluation Metrics (from BlocksWorldValidator):")
     for key, value in metrics.items():
         logger.info(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")
     return metrics
 
 
-def analyze_error_patterns(model: BlocksWorldTTM, test_dataset: Dataset) -> Dict[str, Any]:
+def analyze_error_patterns(model: BlocksWorldTTM, test_dataset: Dataset, num_blocks: int) -> Dict[str, Any]:
     logger.info("Analyzing error patterns (data is -1/1)...")
     if model.model is None:
         logger.error("Model not loaded or trained in BlocksWorldTTM instance.")
         return {}
     model.model.eval()
 
+    validator = BlocksWorldValidator(num_blocks=num_blocks)
     successes = []
     failures = []
     # Tracks which bit indices (0-based) are most commonly wrong
@@ -657,71 +661,67 @@ def analyze_error_patterns(model: BlocksWorldTTM, test_dataset: Dataset) -> Dict
             "num_failures": 0,
             "success_rate": 0,
             "bit_error_counts": {},
-            "success": [],
-            "failure": [],
+            "success_cases": [],
+            "failure_cases": [],
         }
 
     with torch.no_grad():
         for i in range(len(test_dataset)):
             sample = test_dataset[i]  # Data from BlocksWorldDataset is already -1/1
 
-            # Get initial, goal, and target states (all should be -1/1)
-            initial_state_tensor = sample["past_values"][0].to(model.device)  # (state_dim,)
-            goal_state_tensor = sample["static_categorical_values"].to(model.device)  # (state_dim,)
-            # Target is the full future sequence; we're interested in the final step for goal comparison
-            target_final_state_tensor = sample["future_values"][-1].to(model.device)  # (state_dim,)
+            initial_state_tensor = sample["past_values"][0].to(model.device)
+            goal_state_tensor = sample["static_categorical_values"].to(model.device)
+            target_final_state_tensor = sample["future_values"][-1].to(model.device)
 
-            # Create context sequence (repeating the scaled initial state)
-            # initial_state_tensor is already scaled (-1/1)
             context_sequence = initial_state_tensor.unsqueeze(0).repeat(1, model.config.context_length, 1)
-
-            # Prepare inputs for the model
             inputs = {
-                "past_values": context_sequence,  # Already -1/1
+                "past_values": context_sequence,
                 "past_observed_mask": torch.ones_like(context_sequence).to(model.device),
-                "static_categorical_values": goal_state_tensor.unsqueeze(0),  # Already -1/1, add batch dim
+                "static_categorical_values": goal_state_tensor.unsqueeze(0),
                 "freq_token": torch.zeros(1, dtype=torch.long).to(model.device),
             }
 
-            # Get prediction
             outputs = model.model(**inputs)
-            raw_logits = outputs[0]  # Shape: (1, prediction_length, state_dim)
-
+            raw_logits = outputs[0]
             predictions_tanh = torch.tanh(raw_logits)
-            # Binarize to -1 or 1 based on tanh output (threshold at 0)
-            predictions_scaled_binary = torch.where(
+            predictions_scaled_binary_m11 = torch.where(
                 predictions_tanh > 0, torch.tensor(1.0, device=model.device), torch.tensor(-1.0, device=model.device)
             )
+            predicted_final_state_tensor = predictions_scaled_binary_m11[0, -1, :]
 
-            # Get the predicted final state from the sequence
-            predicted_final_state_tensor = predictions_scaled_binary[0, -1, :]  # (state_dim,)
+            # Validate the full predicted sequence
+            predicted_full_sequence_np_m11 = predictions_scaled_binary_m11.squeeze(0).cpu().numpy()
+            predicted_full_sequence_01 = [
+                ((step + 1.0) / 2.0).astype(int).tolist() for step in predicted_full_sequence_np_m11
+            ]
 
-            # Calculate error statistics by comparing predicted_final_state_tensor with target_final_state_tensor
-            # Both are in -1/1 format
+            goal_state_np_m11 = goal_state_tensor.cpu().numpy()
+            goal_state_01 = ((goal_state_np_m11 + 1.0) / 2.0).astype(int).tolist()
+
+            validation_result = validator.validate_sequence(predicted_full_sequence_01, goal_state_01)
+
             errors_mask = predicted_final_state_tensor != target_final_state_tensor
-            errors_indices_tensor = errors_mask.nonzero(as_tuple=False).squeeze(1)  # Get indices of True values
+            errors_indices_tensor = errors_mask.nonzero(as_tuple=False).squeeze(1)
+            num_errors_in_final_state = errors_indices_tensor.numel()
 
-            num_errors = errors_indices_tensor.numel()
-
-            # Track which bits had errors
             for error_idx_tensor in errors_indices_tensor:
-                bit_index = error_idx_tensor.item()  # Convert tensor to Python int
+                bit_index = error_idx_tensor.item()
                 bit_error_counts[bit_index] = bit_error_counts.get(bit_index, 0) + 1
 
-            # Convert tensors to NumPy arrays and then to Python lists for JSON serialization
-            # All these tensors are already in -1/1 format.
             case = {
                 "initial_state": initial_state_tensor.cpu().numpy().tolist(),
-                "goal_state": goal_state_tensor.cpu().numpy().tolist(),
+                "goal_state": goal_state_01,  # Store goal in 0/1 for consistency if desired, or keep -1/1
                 "predicted_final_state": predicted_final_state_tensor.cpu().numpy().tolist(),
                 "target_final_state": target_final_state_tensor.cpu().numpy().tolist(),
-                "num_errors": num_errors,
-                "error_positions": errors_indices_tensor.cpu()
-                .numpy()
-                .tolist(),  # List of feature indices that were wrong
+                "num_errors_in_final_state": num_errors_in_final_state,
+                "error_positions_in_final_state": errors_indices_tensor.cpu().numpy().tolist(),
+                "is_predicted_sequence_valid": validation_result.is_valid,  # New
+                "predicted_sequence_violations": validation_result.violations,  # New
             }
 
-            if num_errors == 0:
+            if (
+                num_errors_in_final_state == 0 and validation_result.is_valid
+            ):  # Success if final state matches AND sequence is valid
                 successes.append(case)
             else:
                 failures.append(case)
@@ -732,53 +732,64 @@ def analyze_error_patterns(model: BlocksWorldTTM, test_dataset: Dataset) -> Dict
     analysis = {
         "num_successes": len(successes),
         "num_failures": len(failures),
-        "success_rate": success_rate,
-        "bit_error_counts": bit_error_counts,  # {feature_index: count_of_errors_for_this_feature}
-        "success_cases": successes,  # Renamed for clarity
-        "failure_cases": failures,  # Renamed for clarity
+        "success_rate_final_state_and_valid_sequence": success_rate,
+        "bit_error_counts_in_final_state": bit_error_counts,
+        "success_cases": successes,
+        "failure_cases": failures,
     }
 
-    logger.info("Error Pattern Analysis (States are -1/1):")
-    logger.info(f"  Number of successful predictions (exact final state match): {analysis['num_successes']}")
+    logger.info("Error Pattern Analysis (States are -1/1, goal in case is 0/1):")
+    logger.info(
+        f"  Number of successful predictions (exact final state match AND valid sequence): {analysis['num_successes']}"
+    )
     logger.info(f"  Number of failed predictions: {analysis['num_failures']}")
-    logger.info(f"  Success rate (exact final state match): {analysis['success_rate']:.4f}")
+    logger.info(
+        f"  Success rate (exact final state AND valid sequence): {analysis['success_rate_final_state_and_valid_sequence']:.4f}"
+    )
 
     if bit_error_counts:
-        logger.info("  Most common error positions (feature_index: count):")
-        # Sort by count descending, then by feature_index ascending for tie-breaking
+        logger.info("  Most common error positions in FINAL STATE (feature_index: count):")
         sorted_errors = sorted(bit_error_counts.items(), key=lambda x: (-x[1], x[0]))
-        for feature_idx, count in sorted_errors[:10]:  # Log top 10
+        for feature_idx, count in sorted_errors[:10]:
             logger.info(f"    Feature Index {feature_idx}: {count} errors")
     else:
-        logger.info("  No bit errors recorded across all failed predictions (or no failures).")
+        logger.info("  No bit errors recorded in final states across all failed predictions (or no failures).")
 
-    # Helper to convert -1/1 state to 0/1 string for logging
-    def format_state_for_log(state_list_minus_one_one):
+    def format_state_for_log(state_list_minus_one_one):  # Expects -1/1
         if not state_list_minus_one_one:
             return "[]"
-        # Convert to 0/1 for easier reading in logs
         state_01 = [int((x + 1) / 2) for x in state_list_minus_one_one]
         return str(state_01)
+
+    def format_goal_for_log(state_list_zero_one):  # Expects 0/1
+        if not state_list_zero_one:
+            return "[]"
+        return str(state_list_zero_one)
 
     logger.info("\nExample Successes (up to 3, states shown as 0/1 for readability):")
     for i, case_data in enumerate(analysis["success_cases"][:3]):
         logger.info(f"Success Case {i + 1}:")
         logger.info(f"  Initial State (0/1): {format_state_for_log(case_data['initial_state'])}")
-        logger.info(f"  Goal State (0/1):    {format_state_for_log(case_data['goal_state'])}")
+        logger.info(
+            f"  Goal State (0/1):    {format_goal_for_log(case_data['goal_state'])}"
+        )  # goal_state is already 0/1
         logger.info(f"  Predicted Final (0/1): {format_state_for_log(case_data['predicted_final_state'])}")
-        # Target final state is same as predicted for success cases
-        # logger.info(f"  Target Final (0/1):    {format_state_for_log(case_data['target_final_state'])}")
+        logger.info(f"  Predicted Sequence Valid: {case_data['is_predicted_sequence_valid']}")
 
     logger.info("\nExample Failures (up to 3, states shown as 0/1 for readability):")
     for i, case_data in enumerate(analysis["failure_cases"][:3]):
         logger.info(f"Failure Case {i + 1}:")
         logger.info(f"  Initial State (0/1): {format_state_for_log(case_data['initial_state'])}")
-        logger.info(f"  Goal State (0/1):    {format_state_for_log(case_data['goal_state'])}")
+        logger.info(
+            f"  Goal State (0/1):    {format_goal_for_log(case_data['goal_state'])}"
+        )  # goal_state is already 0/1
         logger.info(f"  Predicted Final (0/1): {format_state_for_log(case_data['predicted_final_state'])}")
         logger.info(f"  Target Final (0/1):    {format_state_for_log(case_data['target_final_state'])}")
-        logger.info(f"  Number of Errors: {case_data['num_errors']}")
-        logger.info(f"  Error Positions (feature indices): {case_data['error_positions']}")
-
+        logger.info(f"  Num Errors (Final State): {case_data['num_errors_in_final_state']}")
+        logger.info(f"  Error Pos (Final State): {case_data['error_positions_in_final_state']}")
+        logger.info(f"  Predicted Sequence Valid: {case_data['is_predicted_sequence_valid']}")
+        if not case_data["is_predicted_sequence_valid"]:
+            logger.info(f"  Violations:\n{pprint(case_data['predicted_sequence_violations'])}")
     return analysis
 
 
@@ -815,7 +826,6 @@ def prepare_overfit_test_datasets(
     return overfit_train_dataset, overfit_val_dataset
 
 
-# ** Main Execution **
 def main_overfit():
     parser = argparse.ArgumentParser(description="Train or evaluate a TTM model on the BlocksWorld domain.")
     parser.add_argument("mode", choices=["train", "evaluate"], help="Script mode: train or evaluate.")
@@ -988,153 +998,124 @@ def main_overfit():
         logger.info("** Evaluating model on the SAME small training set used for overfitting **")
 
         overfit_model_instance.eval()
-        perfect_predictions_count = 0
+        perfect_predictions_count = 0  # Counts perfect match with target masked sequence
+        num_valid_overfit_plans = 0  # Counts valid plans by BlocksWorldValidator
         total_loss_from_model_on_train = 0.0
 
-        # train_ds is Subset of 4 samples
+        # num_blocks is already inferred earlier in main_overfit
+        validator = BlocksWorldValidator(num_blocks=num_blocks)  # Initialize validator
+
         overfit_dataloader = DataLoader(train_ds, batch_size=model_cfg.batch_size)
         inspection_data = []
 
         with torch.no_grad():
             for batch_idx, batch in enumerate(overfit_dataloader):
-                # Ensure batch items are correctly moved to device if not already
                 past_values = batch["past_values"].to(DEVICE)
-                future_values_target = batch["future_values"].to(DEVICE)  # This is already -1/1
+                future_values_target = batch["future_values"].to(DEVICE)
                 past_observed_mask = batch["past_observed_mask"].to(DEVICE)
-                future_observed_mask = batch["future_observed_mask"].to(DEVICE)  # Important for loss
-                static_categorical_values = batch["static_categorical_values"].to(DEVICE)  # This is already -1/1
+                future_observed_mask = batch["future_observed_mask"].to(DEVICE)
+                static_categorical_values = batch["static_categorical_values"].to(DEVICE)  # Goal state, -1/1
                 freq_token = batch["freq_token"].to(DEVICE)
 
-                # Get loss directly from the model, similar to how Trainer would
                 outputs_with_loss = overfit_model_instance(
-                    past_values=past_values,  # -1/1
+                    past_values=past_values,
                     past_observed_mask=past_observed_mask,
                     static_categorical_values=static_categorical_values,
-                    future_values=future_values_target,  # -1/1
+                    future_values=future_values_target,
                     future_observed_mask=future_observed_mask,
                     freq_token=freq_token,
                 )
-                loss_from_model_per_batch = outputs_with_loss[0]  # MSE(logits, -1/1 targets)
+                loss_from_model_per_batch = outputs_with_loss[0]
                 total_loss_from_model_on_train += loss_from_model_per_batch.item() * past_values.size(0)
 
-                # For perfect prediction check, get the raw predictions separately
                 outputs_for_prediction = overfit_model_instance(
                     past_values=past_values,
                     past_observed_mask=past_observed_mask,
                     static_categorical_values=static_categorical_values,
-                    future_values=None,  # No labels for this call
+                    future_values=None,
                     future_observed_mask=None,
                     freq_token=freq_token,
                 )
-                predictions_raw_logits = outputs_for_prediction[0]
+                predictions_raw_logits = outputs_for_prediction[0]  # (batch, pred_len, state_dim)
                 predictions_tanh = torch.tanh(predictions_raw_logits)
-                predictions_final_scaled = torch.where(
+                predictions_final_scaled_m11 = torch.where(  # (batch, pred_len, state_dim) -1/1
                     predictions_tanh > 0, torch.tensor(1.0, device=DEVICE), torch.tensor(-1.0, device=DEVICE)
                 )
 
-                # Store data for inspection (for each item in the batch)
                 for i in range(past_values.shape[0]):  # Iterate through items in the current batch
-                    sample_idx_in_subset = batch_idx * model_cfg.batch_size + i  # Get an overall index if needed
+                    sample_idx_in_subset = batch_idx * model_cfg.batch_size + i
 
-                    # We are interested in the parts of future_values_target and predictions_raw_logits
-                    # where future_observed_mask is 1.
-                    active_mask_for_sample = future_observed_mask[i].bool()  # (prediction_length, num_features)
-
-                    # Get the actual target values where the mask is active
-                    # Squeeze if num_features is 1, otherwise it's fine
-                    masked_target = future_values_target[i][active_mask_for_sample]  # -1/1
-
-                    # Get the raw logits corresponding to these active targets
+                    active_mask_for_sample = future_observed_mask[i].bool()
+                    masked_target_m11 = future_values_target[i][active_mask_for_sample]
                     masked_logits = predictions_raw_logits[i][active_mask_for_sample]
-
                     masked_tanh_preds = predictions_tanh[i][active_mask_for_sample]
-                    masked_scaled_binary_preds = predictions_final_scaled[i][active_mask_for_sample]  # -1/1
-                    mismatched_indices = (masked_scaled_binary_preds != masked_target).nonzero(as_tuple=True)[0]
+                    masked_scaled_binary_preds_m11 = predictions_final_scaled_m11[i][active_mask_for_sample]
 
-                    # Also get the sigmoided and rounded predictions for these active parts
-                    # masked_sigmoid_preds = predictions_sigmoid[i][active_mask_for_sample]
-                    # masked_rounded_preds = predictions_rounded[i][active_mask_for_sample]
+                    mismatched_indices = (masked_scaled_binary_preds_m11 != masked_target_m11).nonzero(as_tuple=True)[0]
+                    is_perfect_masked_match = mismatched_indices.numel() == 0
 
-                    # mismatched_indices = (masked_rounded_preds != masked_target).nonzero(as_tuple=True)[0]
-
-                    if mismatched_indices.numel() == 0:
+                    if is_perfect_masked_match:
                         perfect_predictions_count += 1
-                        # Update logging to reflect -1/1 data and tanh/scaled_binary predictions
-                        logger.debug(
-                            f"    Mismatched scaled binary preds: {masked_scaled_binary_preds[mismatched_indices].cpu().numpy()}"
-                        )
-                        logger.debug(
-                            f"    Mismatched targets (-1/1):       {masked_target[mismatched_indices].cpu().numpy()}"
-                        )
-                        logger.debug(
-                            f"    Corresponding tanh:    {masked_tanh_preds[mismatched_indices].cpu().numpy().round(decimals=3)}"
-                        )
+                        logger.debug(f"  Sample {sample_idx_in_subset}: Perfect match on masked parts with target.")
                     else:
-                        # This case should mean perfect_predictions_count increments, but it's not.
-                        # This implies the `is_perfect_for_sample` logic itself might have an issue if this branch is hit
-                        # but perfect_predictions_count doesn't go up.
-                        # However, it's more likely the mismatch is real.
-                        logger.debug(
-                            f"  Sample {sample_idx_in_subset}: No mismatch found in this detailed check for this sample (masked parts)."
-                        )
-                        # If this prints, but perfect_predictions_count is 0, then the comparison logic for perfect_predictions_count is flawed.
-                        # But given the previous logs, it's more likely there IS a mismatch somewhere in the full masked sequence.
+                        logger.debug(f"  Sample {sample_idx_in_subset}: Mismatch found on masked parts with target.")
+                        # Add more detailed logging if needed, e.g., specific mismatched values
+
+                    # Validate the full predicted sequence for this item
+                    item_pred_seq_np_m11 = predictions_final_scaled_m11[i].cpu().numpy()
+                    item_pred_seq_01 = [((s + 1.0) / 2.0).astype(int).tolist() for s in item_pred_seq_np_m11]
+
+                    item_goal_np_m11 = static_categorical_values[i].cpu().numpy()  # Goal for this item
+                    item_goal_01 = ((item_goal_np_m11 + 1.0) / 2.0).astype(int).tolist()
+
+                    item_validation_result = validator.validate_sequence(item_pred_seq_01, item_goal_01)
+                    if item_validation_result.is_valid:
+                        num_valid_overfit_plans += 1
 
                     inspection_data.append(
                         {
                             "sample_index_in_subset": sample_idx_in_subset,
                             "batch_idx": batch_idx,
                             "item_in_batch": i,
-                            "raw_logits_full": predictions_raw_logits[i]
-                            .cpu()
-                            .numpy()
-                            .tolist(),  # (prediction_length, num_features)
-                            "target_full": future_values_target[i]
-                            .cpu()
-                            .numpy()
-                            .tolist(),  # (prediction_length, num_features)
-                            "future_mask_full": future_observed_mask[i]
-                            .cpu()
-                            .numpy()
-                            .tolist(),  # (prediction_length, num_features)
-                            "masked_raw_logits": masked_logits.cpu()
-                            .numpy()
-                            .tolist(),  # Flattened list of active logits
-                            "masked_target_values": masked_target.cpu()
-                            .numpy()
-                            .tolist(),  # Flattened list of active targets
+                            "raw_logits_full": predictions_raw_logits[i].cpu().numpy().tolist(),
+                            "target_full": future_values_target[i].cpu().numpy().tolist(),
+                            "future_mask_full": future_observed_mask[i].cpu().numpy().tolist(),
+                            "masked_raw_logits": masked_logits.cpu().numpy().tolist(),
+                            "masked_target_values": masked_target_m11.cpu().numpy().tolist(),
                             "masked_tanh_preds": masked_tanh_preds.cpu().numpy().tolist(),
-                            "masked_scaled_binary_preds": masked_scaled_binary_preds.cpu().numpy().tolist(),
-                            "loss_for_this_batch_from_model": loss_from_model_per_batch.item(),  # Loss for the whole batch
+                            "masked_scaled_binary_preds": masked_scaled_binary_preds_m11.cpu().numpy().tolist(),
+                            "loss_for_this_batch_from_model": loss_from_model_per_batch.item(),
+                            "is_perfect_masked_match": is_perfect_masked_match,
+                            "is_pred_sequence_valid": item_validation_result.is_valid,
+                            "pred_sequence_violations": item_validation_result.violations,
                         }
                     )
-
-                    is_perfect_for_sample = mismatched_indices.numel() == 0
-                    if is_perfect_for_sample:
-                        perfect_predictions_count += 1
-
-                    # # Perfect Prediction Check (on masked parts)
-                    # is_perfect_for_sample = torch.all(
-                    #     masked_rounded_preds == masked_target  # Comparing already masked parts
-                    # )
-                    # if is_perfect_for_sample:
-                    #     perfect_predictions_count += 1
 
         avg_loss_from_model_on_train = total_loss_from_model_on_train / len(train_ds)
         logger.info(f"*** Overfitting Test Results (on the {NUM_OVERFIT_SAMPLES} training samples) ***")
         logger.info(f"Average Loss (from model's forward pass) on training data: {avg_loss_from_model_on_train:.6f}")
-        logger.info(f"Number of perfectly predicted sequences (masked): {perfect_predictions_count}/{len(train_ds)}")
+        logger.info(
+            f"Number of perfectly predicted sequences (masked parts match target): {perfect_predictions_count}/{len(train_ds)}"
+        )
+        logger.info(
+            f"Number of validly generated plan sequences (by BlocksWorldValidator): {num_valid_overfit_plans}/{len(train_ds)}"
+        )
 
         # Now print the inspection_data
-        logger.info("** Detailed Inspection of Predictions (First few samples) **")
+        logger.info("** Detailed Inspection of Predictions (first few samples) **")
         for k, data_item in enumerate(inspection_data):
-            if k >= 2 and len(inspection_data) > 2:  # Print details for first 2 samples if more than 2, else print all
+            # Print details for first 2 samples if more than 2, else print all
+            if k >= 2 and len(inspection_data) > 2:
                 logger.info(f"... (omitting details for remaining {len(inspection_data) - k} samples) ...")
                 break
             logger.info(
                 f"** Sample {data_item['sample_index_in_subset']} (Batch {data_item['batch_idx']}, Item {data_item['item_in_batch']}) **"
             )
             logger.info(f"  Loss for its batch (from model): {data_item['loss_for_this_batch_from_model']:.6f}")
+            logger.info(f"  Is Perfect Masked Match with Target: {data_item['is_perfect_masked_match']}")
+            logger.info(f"  Is Predicted Sequence Valid (Validator): {data_item['is_pred_sequence_valid']}")
+            if not data_item["is_pred_sequence_valid"]:
+                logger.info(f"  Violations:\n{pprint(data_item['pred_sequence_violations'])}")
 
             # To make printing manageable, let's look at a few time steps and a few features
             # for the 'full' arrays. For 'masked' arrays, they might already be small.
@@ -1176,13 +1157,17 @@ def main_overfit():
                 f"  Masked Scaled Binary Preds (first {num_masked_elements_to_show} active elements): {np.array(data_item['masked_scaled_binary_preds'])[:num_masked_elements_to_show]}"
             )
 
-        if avg_loss_from_model_on_train < 1e-3 and perfect_predictions_count == len(train_ds):  # Adjust threshold
-            logger.success("Overfitting test PASSED: Model successfully memorized the small batch.")
+        if (
+            avg_loss_from_model_on_train < 1e-3
+            and perfect_predictions_count == len(train_ds)
+            and num_valid_overfit_plans == len(train_ds)
+        ):
+            logger.success(
+                "Overfitting test PASSED: Model successfully memorized the small batch and generated valid plans."
+            )
         else:
-            logger.error("Overfitting test FAILED: Model did not memorize the small batch.")
             logger.error(
-                "Check data processing, `__getitem__`, loss function alignment, and model input/output shapes. "
-                "Inspect the printed raw logits and targets above."
+                "Overfitting test FAILED: Model did not fully memorize or generate valid plans for the small batch."
             )
 
     elif args.mode == "evaluate":
@@ -1212,11 +1197,11 @@ def main_overfit():
         eval_results_dir = args.output_dir / f"evaluation_results_{args.model_load_path.name}"
         eval_results_dir.mkdir(parents=True, exist_ok=True)
 
-        metrics = evaluate_model(ttm_model, test_ds)
+        metrics = evaluate_model(ttm_model, test_ds, num_blocks)
         with open(eval_results_dir / "evaluation_metrics.json", "w") as f:
             json.dump(metrics, f, indent=4)
 
-        error_analysis = analyze_error_patterns(ttm_model, test_ds)
+        error_analysis = analyze_error_patterns(ttm_model, test_ds, num_blocks)
         with open(eval_results_dir / "evaluation_error_analysis.json", "w") as f:
             json.dump(error_analysis, f, indent=4)
 
@@ -1339,11 +1324,11 @@ def main():
 
         if test_ds:
             logger.info("** Evaluating model on test set after training **")
-            metrics = evaluate_model(ttm_model, test_ds)
+            metrics = evaluate_model(ttm_model, test_ds, num_blocks)
             with open(args.output_dir / "test_metrics_after_train.json", "w") as f:
                 json.dump(metrics, f, indent=4)
 
-            error_analysis = analyze_error_patterns(ttm_model, test_ds)
+            error_analysis = analyze_error_patterns(ttm_model, test_ds, num_blocks)
             with open(args.output_dir / "test_error_analysis_after_train.json", "w") as f:
                 json.dump(error_analysis, f, indent=4)
 
@@ -1378,11 +1363,11 @@ def main():
         eval_results_dir = args.output_dir / f"evaluation_results_{args.model_load_path.name}"
         eval_results_dir.mkdir(parents=True, exist_ok=True)
 
-        metrics = evaluate_model(ttm_model, test_ds)
+        metrics = evaluate_model(ttm_model, test_ds, num_blocks)
         with open(eval_results_dir / "evaluation_metrics.json", "w") as f:
             json.dump(metrics, f, indent=4)
 
-        error_analysis = analyze_error_patterns(ttm_model, test_ds)
+        error_analysis = analyze_error_patterns(ttm_model, test_ds, num_blocks)
         with open(eval_results_dir / "evaluation_error_analysis.json", "w") as f:
             json.dump(error_analysis, f, indent=4)
 

@@ -14,10 +14,11 @@ import torch
 from loguru import logger
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
-from torch.utils.data import Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, Subset, random_split
+from torch.utils.tensorboard.writer import SummaryWriter
 from transformers.modeling_utils import PreTrainedModel
 from transformers.trainer import Trainer
-from transformers.trainer_callback import EarlyStoppingCallback
+from transformers.trainer_callback import EarlyStoppingCallback, TrainerCallback
 from transformers.trainer_utils import set_seed
 from transformers.training_args import TrainingArguments
 from tsfm_public import TrackingCallback
@@ -60,6 +61,28 @@ class BlocksWorldSample:
     plan: List[List[int]]  # Sequence of state vectors
     actions: List[List[str]]  # Sequence of action descriptions
     feature_names: List[str]
+
+
+# Callback class for custom TensorBoard logging
+class TensorBoardLoggingCallback(TrainerCallback):
+    def __init__(self, tb_writer: SummaryWriter):
+        self.tb_writer = tb_writer
+
+    def on_log(self, args, state, control, model=None, logs=None, **kwargs):
+        """Called when logging occurs during training"""
+        if logs is not None and self.tb_writer is not None:
+            for key, value in logs.items():
+                if isinstance(value, (int, float)):
+                    # Log all numeric metrics
+                    self.tb_writer.add_scalar(f"training/{key}", value, state.global_step)
+
+    def on_evaluate(self, args, state, control, model=None, logs=None, **kwargs):
+        """Called after evaluation"""
+        if logs is not None and self.tb_writer is not None:
+            for key, value in logs.items():
+                if isinstance(value, (int, float)) and key.startswith("eval_"):
+                    # Log evaluation metrics
+                    self.tb_writer.add_scalar(f"evaluation/{key}", value, state.global_step)
 
 
 # ** Dataset Class **
@@ -183,6 +206,7 @@ class BlocksWorldTTM:
         self.model_name: str
         self.trainer: Trainer
         self.output_dir: PosixPath | Path = output_dir
+        self.tb_writer: Optional[SummaryWriter] = None
 
     def train(
         self,
@@ -212,6 +236,12 @@ class BlocksWorldTTM:
         self.model_name = str(get_model(**get_model_params))  # Ensure it's string
         logger.info(f"Base TTM model key: {self.model_name}")
 
+        # Initialize TensorBoard writer
+        tensorboard_log_dir = self.output_dir / "tensorboard_logs"
+        tensorboard_log_dir.mkdir(parents=True, exist_ok=True)
+        self.tb_writer = SummaryWriter(log_dir=str(tensorboard_log_dir))
+        logger.info(f"TensorBoard logs will be saved to: {tensorboard_log_dir}")
+
         training_args = TrainingArguments(
             output_dir=posixpath.join(self.output_dir, "training_output"),
             learning_rate=self.config.learning_rate,
@@ -224,7 +254,10 @@ class BlocksWorldTTM:
             metric_for_best_model="eval_loss",
             greater_is_better=False,
             seed=self.config.seed,
-            report_to="none",
+            report_to="tensorboard",  # Enable TensorBoard reporting
+            logging_dir=str(tensorboard_log_dir),  # Set logging directory
+            logging_strategy="steps",
+            logging_steps=10,  # Log every 10 steps
             dataloader_pin_memory=False,
         )
 
@@ -232,6 +265,7 @@ class BlocksWorldTTM:
         callbacks = [
             TrackingCallback(),
             EarlyStoppingCallback(early_stopping_patience=5),
+            TensorBoardLoggingCallback(self.tb_writer),  # Custom callback for additional logging
         ]
 
         # Optimizer and scheduler
@@ -248,6 +282,19 @@ class BlocksWorldTTM:
             steps_per_epoch=steps_per_epoch,
         )
 
+        # Log hyperparameters to TensorBoard
+        self.tb_writer.add_hparams(
+            {
+                "learning_rate": self.config.learning_rate,
+                "batch_size": self.config.batch_size,
+                "num_epochs": self.config.num_epochs,
+                "context_length": self.config.context_length,
+                "prediction_length": self.config.prediction_length,
+                "state_dim": self.config.state_dim,
+            },
+            {},
+        )
+
         self.trainer = Trainer(
             model=self.model,
             args=training_args,
@@ -260,6 +307,10 @@ class BlocksWorldTTM:
         logger.info("Trainer initialized. Starting training...")
         self.trainer.train()
         logger.info("Training finished.")
+
+        # Close TensorBoard writer
+        if self.tb_writer:
+            self.tb_writer.close()
 
     def predict(self, initial_states: torch.Tensor, goal_states: torch.Tensor) -> torch.Tensor:
         """Generate action sequences to reach goals from given states"""
@@ -676,7 +727,444 @@ def analyze_error_patterns(model: BlocksWorldTTM, test_dataset) -> Dict[str, Any
     return analysis
 
 
+def prepare_overfit_test_datasets(
+    data_path: Path, context_length: int, prediction_length: int, seed: int, num_overfit_samples: int = 4
+) -> Tuple[Dataset, Optional[Dataset]]:  # Val dataset can be None for this test
+    logger.info(f"Preparing dataset for overfitting test with {num_overfit_samples} samples...")
+    full_dataset = BlocksWorldDataset(str(data_path), context_length, prediction_length)
+
+    if len(full_dataset) < num_overfit_samples:
+        logger.warning(
+            f"Full dataset ({len(full_dataset)}) is smaller than requested num_overfit_samples ({num_overfit_samples}). "
+            f"Using all available samples."
+        )
+        num_overfit_samples = len(full_dataset)
+        if num_overfit_samples == 0:
+            logger.error("Dataset is empty. Cannot perform overfitting test.")
+            return None, None
+
+    # Create a subset of the full_dataset for overfitting
+    indices = list(range(num_overfit_samples))
+    overfit_train_dataset = Subset(full_dataset, indices)
+
+    logger.info(
+        f"Overfit training dataset created with {len(overfit_train_dataset)} samples."
+        f" State_dim: {getattr(full_dataset, 'state_dim')}"  # Access state_dim from the original full_dataset
+    )
+
+    # For overfitting, we often don't need a separate validation set, as we're just checking if it can memorize the training data.
+    overfit_val_dataset = None
+    # If the Trainer setup strictly requires it, use the same small set.
+    # overfit_val_dataset = Subset(full_dataset, indices)
+
+    return overfit_train_dataset, overfit_val_dataset
+
+
 # ** Main Execution **
+def main_overfit():
+    parser = argparse.ArgumentParser(description="Train or evaluate a TTM model on the BlocksWorld domain.")
+    parser.add_argument("mode", choices=["train", "evaluate"], help="Script mode: train or evaluate.")
+    parser.add_argument("--dataset_file", type=Path, required=True, help="Path to the JSON dataset file.")
+    parser.add_argument(
+        "--output_dir",
+        type=Path,
+        default=Path("output_blocksworld_ttm"),
+        help="Directory to save models, logs, and results.",
+    )
+    parser.add_argument(
+        "--model_load_path",
+        type=Path,
+        help="Path to load a pre-trained model's assets directory (required for 'evaluate' mode).",
+    )
+
+    # Model and training parameters
+    parser.add_argument(
+        "--ttm_model_path",
+        type=str,
+        default=DEFAULT_TTM_MODEL_PATH,
+        help="Base TTM model path from HuggingFace or local. Default to 'ibm-granite/granite-timeseries-ttm-r2'.",
+    )
+    parser.add_argument(
+        "--context_length",
+        type=int,
+        help="Context length for TTM. If not provided, determined from dataset.",
+    )
+    parser.add_argument(
+        "--prediction_length",
+        type=int,
+        help="Prediction length for TTM. If not provided, determined from dataset.",
+    )
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate. Default is 1e-4.")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size. Default is 32.")
+    parser.add_argument("--num_epochs", type=int, default=50, help="Number of training epochs. Default is 50.")
+
+    # Other parameters
+    parser.add_argument("--seed", type=int, default=13, help="Random seed. Default is 13.")
+    parser.add_argument(
+        "--log_level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level. Default is INFO.",
+    )
+
+    args = parser.parse_args()
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    log_file = args.output_dir / f"run_{args.mode}.log"
+    setup_logging(args.log_level, log_file)
+
+    logger.info(f"Script arguments: {pformat(vars(args))}")
+
+    # Set seed
+    set_seed(args.seed)
+    logger.info(f"Random seed set to: {args.seed}")
+
+    # Infer the number of blocks
+    num_blocks = int(str(args.dataset_file).split("_")[-1][0])
+    logger.info(f"Inferred number of blocks from dataset filename: {num_blocks}")
+
+    if args.mode == "train":
+        logger.info("** Starting Training Mode (Overfitting Test Variant) **")
+
+        dataset_stats = analyze_dataset(args.dataset_file)
+
+        auto_context_length, auto_prediction_length = determine_ttm_lengths(
+            dataset_stats["max_plan_length"],
+            dataset_stats["recommended_prediction_length"],
+            args.context_length,
+            args.prediction_length,
+        )
+
+        # ** Overfitting Test Specific Config **
+        NUM_OVERFIT_SAMPLES = 4  # Or make this an argparse argument
+        OVERFIT_EPOCHS = 200  # Train for longer to ensure memorization
+        OVERFIT_BATCH_SIZE = min(args.batch_size, NUM_OVERFIT_SAMPLES)  # Batch size can be small
+        OVERFIT_LR = args.learning_rate  # Start with the same LR, might need adjustment
+
+        logger.info("** OVERFITTING TEST PARAMETERS **")
+        logger.info(f"Number of samples to overfit: {NUM_OVERFIT_SAMPLES}")
+        logger.info(f"Epochs for overfitting: {OVERFIT_EPOCHS}")
+        logger.info(f"Batch size for overfitting: {OVERFIT_BATCH_SIZE}")
+        logger.info(f"Learning rate for overfitting: {OVERFIT_LR}")
+        logger.info("**********************")
+
+        model_cfg = ModelConfig(
+            context_length=auto_context_length,
+            prediction_length=auto_prediction_length,
+            learning_rate=OVERFIT_LR,  # Use overfit LR
+            batch_size=OVERFIT_BATCH_SIZE,  # Use overfit batch size
+            num_epochs=OVERFIT_EPOCHS,  # Use overfit epochs
+            ttm_model_path=args.ttm_model_path,
+            seed=args.seed,
+            state_dim=dataset_stats["state_dim"],
+        )
+        logger.info(f"Using ModelConfig for Overfitting: {pformat(asdict(model_cfg))}")
+
+        # Use the new dataset preparation function
+        train_ds, val_ds = prepare_overfit_test_datasets(
+            args.dataset_file,
+            model_cfg.context_length,
+            model_cfg.prediction_length,
+            args.seed,
+            num_overfit_samples=NUM_OVERFIT_SAMPLES,
+        )
+
+        if not train_ds:
+            logger.error("Training dataset for overfitting is empty or None. Cannot train.")
+            return 1
+
+        ttm_model = BlocksWorldTTM(model_cfg, device=DEVICE, output_dir=args.output_dir)
+
+        logger.info("Initializing TTM model for overfitting test...")
+        get_model_params = {
+            "model_path": model_cfg.ttm_model_path,
+            "context_length": model_cfg.context_length,
+            "prediction_length": model_cfg.prediction_length,
+            "head_dropout": 0.1,  # Keep consistent with your main training
+        }
+        overfit_model_instance: PreTrainedModel = get_model(**get_model_params).to(DEVICE)
+
+        overfit_training_args = TrainingArguments(
+            output_dir=posixpath.join(args.output_dir, "overfitting_training_output"),
+            learning_rate=model_cfg.learning_rate,
+            num_train_epochs=model_cfg.num_epochs,
+            per_device_train_batch_size=model_cfg.batch_size,
+            per_device_eval_batch_size=model_cfg.batch_size if val_ds else model_cfg.batch_size,
+            eval_strategy="no",  # Not strictly needed for overfitting test
+            save_strategy="no",
+            load_best_model_at_end=False,
+            seed=model_cfg.seed,
+            report_to="tensorboard",  # Enable TensorBoard reporting
+            logging_dir=str(args.output_dir / "tensorboard_logs_overfit"),  # Set logging directory
+            logging_strategy="steps",
+            logging_steps=1,  # Log loss every step for overfitting test
+            dataloader_pin_memory=False,
+            disable_tqdm=False,
+        )
+
+        logger.info(f"TensorBoard logs saved to: {args.output_dir / 'tensorboard_logs'}")
+        logger.info("To view TensorBoard, run: tensorboard --logdir=" + str(args.output_dir / "tensorboard_logs"))
+
+        optimizer = AdamW(overfit_model_instance.parameters(), lr=model_cfg.learning_rate)
+        num_train_samples = len(train_ds)
+        steps_per_epoch = math.ceil(num_train_samples / (model_cfg.batch_size * overfit_training_args.world_size))
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=model_cfg.learning_rate,
+            epochs=model_cfg.num_epochs,
+            steps_per_epoch=steps_per_epoch,
+        )
+
+        overfit_trainer = Trainer(
+            model=overfit_model_instance,
+            args=overfit_training_args,
+            train_dataset=train_ds,
+            eval_dataset=val_ds,
+            callbacks=[TrackingCallback()],  # No EarlyStopping
+            optimizers=(optimizer, scheduler),
+        )
+
+        logger.info("Trainer for overfitting initialized. Starting training...")
+        overfit_trainer.train()
+        logger.info("Overfitting training finished.")
+
+        # *** After training, evaluate on the SAME small training set ***
+        logger.info("** Evaluating model on the SAME small training set used for overfitting **")
+
+        overfit_model_instance.eval()
+        perfect_predictions_count = 0
+        total_loss_from_model_on_train = 0.0
+
+        # train_ds is Subset of 4 samples
+        overfit_dataloader = DataLoader(train_ds, batch_size=model_cfg.batch_size)
+        inspection_data = []
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(overfit_dataloader):
+                # Ensure batch items are correctly moved to device if not already
+                past_values = batch["past_values"].to(DEVICE)
+                future_values_target = batch["future_values"].to(DEVICE)
+                past_observed_mask = batch["past_observed_mask"].to(DEVICE)
+                future_observed_mask = batch["future_observed_mask"].to(DEVICE)  # Important for loss
+                static_categorical_values = batch["static_categorical_values"].to(DEVICE)
+                freq_token = batch["freq_token"].to(DEVICE)
+
+                # Get loss directly from the model, similar to how Trainer would
+                outputs_with_loss = overfit_model_instance(
+                    past_values=past_values,
+                    past_observed_mask=past_observed_mask,
+                    static_categorical_values=static_categorical_values,
+                    future_values=future_values_target,  # PROVIDE LABELS
+                    future_observed_mask=future_observed_mask,  # PROVIDE MASK
+                    freq_token=freq_token,
+                )
+                loss_from_model_per_batch = outputs_with_loss[0]  # TTM typically returns loss as first element
+                total_loss_from_model_on_train += loss_from_model_per_batch.item() * past_values.size(0)
+
+                # For perfect prediction check, get the raw predictions separately
+                outputs_for_prediction = overfit_model_instance(
+                    past_values=past_values,
+                    past_observed_mask=past_observed_mask,
+                    static_categorical_values=static_categorical_values,
+                    future_values=None,  # No labels for this call
+                    future_observed_mask=None,
+                    freq_token=freq_token,
+                )
+                predictions_raw_logits = outputs_for_prediction[0]
+                predictions_sigmoid = torch.sigmoid(predictions_raw_logits)
+                predictions_rounded = torch.round(predictions_sigmoid)
+
+                # Store data for inspection (for each item in the batch)
+                for i in range(past_values.shape[0]):  # Iterate through items in the current batch
+                    sample_idx_in_subset = batch_idx * model_cfg.batch_size + i  # Get an overall index if needed
+
+                    # We are interested in the parts of future_values_target and predictions_raw_logits
+                    # where future_observed_mask is 1.
+                    active_mask_for_sample = future_observed_mask[i].bool()  # (prediction_length, num_features)
+
+                    # Get the actual target values where the mask is active
+                    # Squeeze if num_features is 1, otherwise it's fine
+                    masked_target = future_values_target[i][active_mask_for_sample]
+
+                    # Get the raw logits corresponding to these active targets
+                    masked_logits = predictions_raw_logits[i][active_mask_for_sample]
+
+                    # Also get the sigmoided and rounded predictions for these active parts
+                    masked_sigmoid_preds = predictions_sigmoid[i][active_mask_for_sample]
+                    masked_rounded_preds = predictions_rounded[i][active_mask_for_sample]
+
+                    mismatched_indices = (masked_rounded_preds != masked_target).nonzero(as_tuple=True)[0]
+
+                    if mismatched_indices.numel() > 0:
+                        logger.debug(f"  Sample {sample_idx_in_subset}: Mismatch found!")
+                        logger.debug(
+                            f"    Mismatched rounded preds: {masked_rounded_preds[mismatched_indices].cpu().numpy()}"
+                        )
+                        logger.debug(f"    Mismatched targets:       {masked_target[mismatched_indices].cpu().numpy()}")
+                        logger.debug(
+                            f"    Corresponding raw logits: {masked_logits[mismatched_indices].cpu().numpy().round(decimals=3)}"
+                        )  # masked_logits was defined earlier
+                        logger.debug(
+                            f"    Corresponding sigmoid:    {masked_sigmoid_preds[mismatched_indices].cpu().numpy().round(decimals=3)}"
+                        )  # masked_sigmoid_preds was defined earlier
+                    else:
+                        # This case should mean perfect_predictions_count increments, but it's not.
+                        # This implies the `is_perfect_for_sample` logic itself might have an issue if this branch is hit
+                        # but perfect_predictions_count doesn't go up.
+                        # However, it's more likely the mismatch is real.
+                        logger.debug(
+                            f"  Sample {sample_idx_in_subset}: No mismatch found in this detailed check for this sample (masked parts)."
+                        )
+                        # If this prints, but perfect_predictions_count is 0, then the comparison logic for perfect_predictions_count is flawed.
+                        # But given the previous logs, it's more likely there IS a mismatch somewhere in the full masked sequence.
+
+                    inspection_data.append(
+                        {
+                            "sample_index_in_subset": sample_idx_in_subset,
+                            "batch_idx": batch_idx,
+                            "item_in_batch": i,
+                            "raw_logits_full": predictions_raw_logits[i]
+                            .cpu()
+                            .numpy()
+                            .tolist(),  # (prediction_length, num_features)
+                            "target_full": future_values_target[i]
+                            .cpu()
+                            .numpy()
+                            .tolist(),  # (prediction_length, num_features)
+                            "future_mask_full": future_observed_mask[i]
+                            .cpu()
+                            .numpy()
+                            .tolist(),  # (prediction_length, num_features)
+                            "masked_raw_logits": masked_logits.cpu()
+                            .numpy()
+                            .tolist(),  # Flattened list of active logits
+                            "masked_target_values": masked_target.cpu()
+                            .numpy()
+                            .tolist(),  # Flattened list of active targets
+                            "masked_sigmoid_predictions": masked_sigmoid_preds.cpu().numpy().tolist(),
+                            "masked_rounded_predictions": masked_rounded_preds.cpu().numpy().tolist(),
+                            "loss_for_this_batch_from_model": loss_from_model_per_batch.item(),  # Loss for the whole batch
+                        }
+                    )
+
+                    is_perfect_for_sample = mismatched_indices.numel() == 0
+                    if is_perfect_for_sample:
+                        perfect_predictions_count += 1
+
+                    # # Perfect Prediction Check (on masked parts)
+                    # is_perfect_for_sample = torch.all(
+                    #     masked_rounded_preds == masked_target  # Comparing already masked parts
+                    # )
+                    # if is_perfect_for_sample:
+                    #     perfect_predictions_count += 1
+
+        avg_loss_from_model_on_train = total_loss_from_model_on_train / len(train_ds)
+        logger.info(f"*** Overfitting Test Results (on the {NUM_OVERFIT_SAMPLES} training samples) ***")
+        logger.info(f"Average Loss (from model's forward pass) on training data: {avg_loss_from_model_on_train:.6f}")
+        logger.info(f"Number of perfectly predicted sequences (masked): {perfect_predictions_count}/{len(train_ds)}")
+
+        # Now print the inspection_data
+        logger.info("** Detailed Inspection of Predictions (First few samples) **")
+        for k, data_item in enumerate(inspection_data):
+            if k >= 2 and len(inspection_data) > 2:  # Print details for first 2 samples if more than 2, else print all
+                logger.info(f"... (omitting details for remaining {len(inspection_data) - k} samples) ...")
+                break
+            logger.info(
+                f"** Sample {data_item['sample_index_in_subset']} (Batch {data_item['batch_idx']}, Item {data_item['item_in_batch']}) **"
+            )
+            logger.info(f"  Loss for its batch (from model): {data_item['loss_for_this_batch_from_model']:.6f}")
+
+            # To make printing manageable, let's look at a few time steps and a few features
+            # for the 'full' arrays. For 'masked' arrays, they might already be small.
+            num_timesteps_to_show = min(5, model_cfg.prediction_length)
+            num_features_to_show = min(5, model_cfg.state_dim)
+
+            logger.info(
+                f"  Target (future_values_target) - First {num_timesteps_to_show} steps, {num_features_to_show} features:"
+            )
+            for t in range(num_timesteps_to_show):
+                logger.info(f"    t={t}: {np.array(data_item['target_full'])[t, :num_features_to_show]}")
+
+            logger.info(
+                f"  Raw Logits (predictions_raw_logits) - First {num_timesteps_to_show} steps, {num_features_to_show} features:"
+            )
+            for t in range(num_timesteps_to_show):
+                logger.info(
+                    f"    t={t}: {np.array(data_item['raw_logits_full'])[t, :num_features_to_show].round(decimals=3)}"
+                )
+
+            logger.info(
+                f"  Future Observed Mask - First {num_timesteps_to_show} steps, {num_features_to_show} features:"
+            )
+            for t in range(num_timesteps_to_show):
+                logger.info(f"    t={t}: {np.array(data_item['future_mask_full'])[t, :num_features_to_show]}")
+
+            # For masked values, they are already flattened. Let's show some.
+            num_masked_elements_to_show = min(10, len(data_item["masked_target_values"]))
+            logger.info(
+                f"  Masked Target Values (first {num_masked_elements_to_show} active elements): {np.array(data_item['masked_target_values'])[:num_masked_elements_to_show]}"
+            )
+            logger.info(
+                f"  Masked Raw Logits (first {num_masked_elements_to_show} active elements): {np.array(data_item['masked_raw_logits'])[:num_masked_elements_to_show].round(decimals=3)}"
+            )
+            logger.info(
+                f"  Masked Sigmoid Preds (first {num_masked_elements_to_show} active elements): {np.array(data_item['masked_sigmoid_predictions'])[:num_masked_elements_to_show].round(decimals=3)}"
+            )
+            logger.info(
+                f"  Masked Rounded Preds (first {num_masked_elements_to_show} active elements): {np.array(data_item['masked_rounded_predictions'])[:num_masked_elements_to_show]}"
+            )
+
+        if avg_loss_from_model_on_train < 1e-3 and perfect_predictions_count == len(train_ds):  # Adjust threshold
+            logger.success("Overfitting test PASSED: Model successfully memorized the small batch.")
+        else:
+            logger.error("Overfitting test FAILED: Model did not memorize the small batch.")
+            logger.error(
+                "Check data processing, `__getitem__`, loss function alignment, and model input/output shapes. "
+                "Inspect the printed raw logits and targets above."
+            )
+
+    elif args.mode == "evaluate":
+        logger.info("** Starting Evaluation Mode **")
+        if not args.model_load_path:
+            logger.error("--model_load_path is required for 'evaluate' mode.")
+            return 1
+        if not args.model_load_path.exists() or not args.model_load_path.is_dir():
+            logger.error(f"Model assets path {args.model_load_path} does not exist or is not a directory.")
+            return 1
+
+        ttm_model = BlocksWorldTTM.load(args.model_load_path, device=DEVICE)
+
+        # state_dim from loaded model's config is used by BlocksWorldTTM.load
+        # context_length and prediction_length also from loaded config
+        _, _, test_ds = prepare_datasets(  # We only need test_ds here
+            args.dataset_file,
+            ttm_model.config.context_length,
+            ttm_model.config.prediction_length,
+            args.seed,
+        )
+
+        if not test_ds:
+            logger.error("Test dataset is empty or None. Cannot evaluate.")
+            return 1
+
+        eval_results_dir = args.output_dir / f"evaluation_results_{args.model_load_path.name}"
+        eval_results_dir.mkdir(parents=True, exist_ok=True)
+
+        metrics = evaluate_model(ttm_model, test_ds)
+        with open(eval_results_dir / "evaluation_metrics.json", "w") as f:
+            json.dump(metrics, f, indent=4)
+
+        error_analysis = analyze_error_patterns(ttm_model, test_ds)
+        with open(eval_results_dir / "evaluation_error_analysis.json", "w") as f:
+            json.dump(error_analysis, f, indent=4)
+
+        logger.info(f"Evaluation results saved to {eval_results_dir}")
+
+    logger.info("Script finished.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train or evaluate a TTM model on the BlocksWorld domain.")
     parser.add_argument("mode", choices=["train", "evaluate"], help="Script mode: train or evaluate.")
@@ -844,4 +1332,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main_overfit()

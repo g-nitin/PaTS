@@ -90,9 +90,7 @@ class BlocksWorldValidator:
                 for other in blocks:
                     if other != block and (other, block) in self.on_block_indices:
                         if state[self.on_block_indices[(other, block)]] == 1:
-                            violations.append(
-                                f"Block {block} marked as clear but has {other} on top"
-                            )
+                            violations.append(f"Block {block} marked as clear but has {other} on top")
 
         return len(violations) == 0, violations
 
@@ -113,9 +111,7 @@ class BlocksWorldValidator:
         visited.remove(start_block)
         return False
 
-    def _check_legal_transition(
-        self, state1: List[int], state2: List[int]
-    ) -> Tuple[bool, List[str]]:
+    def _check_legal_transition(self, state1: List[int], state2: List[int]) -> Tuple[bool, List[str]]:
         """Check if transition between states is legal according to blocks world rules"""
         violations = []
 
@@ -168,10 +164,7 @@ class BlocksWorldValidator:
         metrics["goal_achievement"] = float(np.array_equal(states[-1], goal_state))
         if len(states) > 1:
             metrics["avg_changes_per_step"] = np.mean(
-                [
-                    sum(1 for a, b in zip(states[i], states[i + 1]) if a != b)
-                    for i in range(len(states) - 1)
-                ]
+                [sum(1 for a, b in zip(states[i], states[i + 1]) if a != b) for i in range(len(states) - 1)]
             )
 
         return ValidationResult(

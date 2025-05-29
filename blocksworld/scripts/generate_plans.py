@@ -63,15 +63,11 @@ def display_single_plan_details(generator: BlocksWorldGenerator, plan_data: dict
     logger.info("** End of Single Plan Details **")
 
 
-def generate_and_save_dataset(
-    generator: BlocksWorldGenerator, num_plans: int, output_file_path_str: str | None
-):
+def generate_and_save_dataset(generator: BlocksWorldGenerator, num_plans: int, output_file_path_str: str | None):
     """
     Generates a dataset of plans and saves it to a JSON file if a path is provided.
     """
-    logger.info(
-        f"Starting dataset generation: {num_plans} plans for {generator.num_blocks} blocks."
-    )
+    logger.info(f"Starting dataset generation: {num_plans} plans for {generator.num_blocks} blocks.")
 
     # Note: BlocksWorldGenerator.generate_dataset prints progress using `end="\r"`.
     # This might interfere with loguru's output. For cleaner logs, this print
@@ -79,9 +75,7 @@ def generate_and_save_dataset(
     dataset = generator.generate_dataset(num_plans=num_plans)
 
     logger.success(f"Dataset generation complete. Generated {len(dataset['plans'])} plans.")
-    logger.info(
-        f"Each state in the dataset is encoded with {dataset['num_features']} binary features."
-    )
+    logger.info(f"Each state in the dataset is encoded with {dataset['num_features']} binary features.")
 
     if output_file_path_str:
         output_path = Path(output_file_path_str)
@@ -104,9 +98,7 @@ def generate_and_save_dataset(
     else:
         logger.info("No output file specified. Dataset will be generated but not saved to disk.")
         if dataset["plans"] and logger.level("DEBUG").no >= logger.level("INFO").no:
-            logger.debug(
-                f"First plan in generated dataset (not saved):\n{pformat(dataset['plans'][0])}"
-            )
+            logger.debug(f"First plan in generated dataset (not saved):\n{pformat(dataset['plans'][0])}")
 
 
 def main():
@@ -214,9 +206,7 @@ def main():
 
             actual_output_file_str = args.output_file
             if actual_output_file_str is None:  # Not specified by user
-                actual_output_file_str = (
-                    f"dataset_{args.num_blocks}blocks_{args.num_plans}plans.json"
-                )
+                actual_output_file_str = f"dataset_{args.num_blocks}blocks_{args.num_plans}plans.json"
                 logger.warning(
                     f"No --output-file specified for dataset. Defaulting to: '{actual_output_file_str}'. "
                     "To prevent saving, use --output-file NONE."
@@ -229,9 +219,7 @@ def main():
             generate_and_save_dataset(generator, args.num_plans, actual_output_file_str)
 
     except Exception:  # Catch all other exceptions
-        logger.exception(
-            "An critical error occurred during script execution:"
-        )  # Automatically includes traceback
+        logger.exception("An critical error occurred during script execution:")  # Automatically includes traceback
         sys.exit(1)
 
     logger.success("Script finished successfully.")

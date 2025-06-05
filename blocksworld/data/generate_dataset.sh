@@ -19,6 +19,9 @@ VALIDATE_PATH="${ROOT_DIR}VAL/validate"
 # PARSER_ENCODER_SCRIPT: Python script to parse VAL output, PDDL, and encode states
 PARSER_ENCODER_SCRIPT="./blocksworld/data/parse_and_encode.py"
 
+# ANALYZE_AND_SPLIT_SCRIPT: Python script to analyze dataset and create train-test splits
+ANALYZE_AND_SPLIT_SCRIPT="./blocksworld/data/analyze_dataset_splits.py"
+
 # OUTPUT_DIR: Directory to store generated PDDL problems, plans, VAL outputs, and final trajectories
 OUTPUT_DIR="./blocksworld/data"
 
@@ -27,7 +30,7 @@ MIN_BLOCKS_TO_GENERATE=4
 MAX_BLOCKS_TO_GENERATE=4
 
 # PROBLEMS_PER_CONFIG: Number of problems to generate for each block count
-PROBLEMS_PER_CONFIG=1000
+PROBLEMS_PER_CONFIG=10000
 
 # FD_TIMEOUT: Timeout for Fast Downward (e.g., 60s, 5m)
 FD_TIMEOUT="60s"
@@ -69,7 +72,7 @@ TOTAL_FAILED_ENCODING=0
 echo "Starting dataset generation..."
 echo "Domain: $DOMAIN_FILE"
 echo "Base Output Directory: $OUTPUT_DIR"
-echo "**********************************-"
+echo "***********************************"
 
 for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
     BLOCK_OUTPUT_DIR="${OUTPUT_DIR}/blocks_${num_blocks}"
@@ -168,13 +171,30 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
             continue
         fi
 
+        # If we reach here, everything was successful for this problem
         echo "    SUCCESS: $PROBLEM_BASENAME processed."
         successful_for_size=$((successful_for_size + 1))
         TOTAL_SUCCESSFUL=$((TOTAL_SUCCESSFUL + 1))
     done
     echo -e "\n"
     echo "  Finished $num_blocks blocks. Successful: $successful_for_size / $PROBLEMS_PER_CONFIG"
-    echo "**********************************-"
+
+    # 5. Analyze dataset and create train-test splits
+    # Call to `analyze_dataset_splits.py` with arguments: 
+        # `dataset_dir`: Path to the root directory of the generated dataset (containing 'plans' subdirectory).
+        # `output_dir`: Directory to save the split files (train_files.txt, etc.) and distribution plots.
+    echo -e "\n"
+    echo "Analyzing dataset splits for $PROBLEM_BASENAME..."
+    uv run python "$ANALYZE_AND_SPLIT_SCRIPT" \
+        "$BLOCK_OUTPUT_DIR" "$BLOCK_OUTPUT_DIR"
+    
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Dataset analysis failed for $PROBLEM_BASENAME"
+        TOTAL_FAILED_ENCODING=$((TOTAL_FAILED_ENCODING + 1))
+        continue
+    fi
+    echo "***********************************"
+    echo -e "\n"
 done
 
 echo "Dataset Generation Complete."
@@ -184,4 +204,4 @@ echo "  Total Failed PDDL Generation: $TOTAL_FAILED_GENERATION"
 echo "  Total Failed Fast Downward:   $TOTAL_FAILED_FD"
 echo "  Total Failed VAL Validation:  $TOTAL_FAILED_VAL"
 echo "  Total Failed Encoding:        $TOTAL_FAILED_ENCODING"
-echo "**********************************-"
+echo "***********************************"

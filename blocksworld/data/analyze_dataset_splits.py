@@ -337,7 +337,8 @@ def main():
     parser.add_argument(
         "--plot_kde",
         action="store_true",
-        help="Include Kernel Density Estimate lines on the distribution plots. Default is False.",
+        default=True,
+        help="Include Kernel Density Estimate lines on the distribution plots. Default is True.",
     )
 
     args = parser.parse_args()

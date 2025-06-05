@@ -2,14 +2,12 @@
 **/*.pyc
 .vscode/
 
-own/
-blocksworld/models
-blocksworld/scripts/blocks_world_ttm/
-ttm_finetuned_models/
-outputs/
-
 blocksworld/data/*
 !blocksworld/data/generate_dataset.sh
 !blocksworld/data/parse_and_encode.py
+!blocksworld/data/analyze_dataset_splits.py
+!blocksworld/data/README.md
 
+blocksworld/outputs/
 blocksworld/data_original/*.json
+own/

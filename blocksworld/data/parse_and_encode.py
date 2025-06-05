@@ -91,7 +91,7 @@ def pddlpy_pred_to_normalized_string(pred_input):
 
     if not predicate_parts:
         # This case should ideally not be reached if PDDL is valid and parsing is correct.
-        # print(f"Warning: pddlpy_pred_to_normalized_string received empty predicate_parts for input: {pred_input}")
+        # print(f"    WARNING: pddlpy_pred_to_normalized_string received empty predicate_parts for input: {pred_input}")
         return "()"
 
     pred_name = str(predicate_parts[0]).lower()
@@ -114,7 +114,7 @@ def get_goal_preds_from_pddlpy(problem_goal_literal):
 
     def extract_conjunctive_goals_recursive(literal_node):
         if literal_node is None:  # Handle cases where a goal might be empty or malformed
-            print("Warning: extract_conjunctive_goals_recursive received a None literal_node.")
+            print("    WARNING: extract_conjunctive_goals_recursive received a None literal_node.")
             return
 
         # Assuming literal_node.op and literal_node.args exist as per pddlpy.literal.Literal structure
@@ -126,7 +126,7 @@ def get_goal_preds_from_pddlpy(problem_goal_literal):
         elif op_name in ["or", "not", "imply", "forall", "exists"]:
             # If you encounter this, you might need to extend goal parsing or simplify PDDL goals.
             print(
-                f"WARNING: PaTS currently only supports simple conjunctive PDDL goals for 'get_goal_preds_from_pddlpy'. Found operator: {op_name}. Full goal: {literal_node}. "
+                f"    WARNING: PaTS currently only supports simple conjunctive PDDL goals for 'get_goal_preds_from_pddlpy'. Found operator: {op_name}. Full goal: {literal_node}. "
                 "The 'domprob.goals()' method might still provide positive literals if available."
             )
             # Optionally, try to fall back to domprob.goals() if this structured parsing fails for complex goals.
@@ -197,7 +197,7 @@ def extract_states_from_val_output(val_output_filepath, initial_state_preds_norm
                 if normalized_pred in current_state_normalized:
                     current_state_normalized.remove(normalized_pred)
                 # else:
-                #     print(f"Warning: VAL tried to delete non-existent predicate '{normalized_pred}' from current state in {val_output_filepath}")
+                #     print(f"    WARNING: VAL tried to delete non-existent predicate '{normalized_pred}' from current state in {val_output_filepath}")
             elif line.lower().startswith("adding"):
                 current_state_normalized.add(normalized_pred)
 
@@ -237,7 +237,7 @@ def main():
     parser.add_argument("--binary_goal_output", required=True, help="Path to save binary encoded goal state (.npy).")
     args = parser.parse_args()
 
-    print(f"INFO: Processing {args.pddl_problem_file} with {args.val_output_file}")
+    print(f"    INFO: Processing {args.pddl_problem_file} with {args.val_output_file}")
 
     try:
         # 1. Generate the master list of all possible predicates (normalized)
@@ -259,7 +259,7 @@ def main():
         initial_state_atoms = domprob.initialstate()
         initial_state_preds_normalized_set = {pddlpy_pred_to_normalized_string(atom) for atom in initial_state_atoms}
         if not initial_state_preds_normalized_set and args.num_blocks > 0:
-            print(f"WARNING: No initial state predicates parsed from {args.pddl_problem_file}.")
+            print(f"    WARNING: No initial state predicates parsed from {args.pddl_problem_file}.")
 
         # Parse Goal State:
         # domprob.problem.goal is expected to be a pddlpy.literal.Literal object representing the goal structure
@@ -271,7 +271,7 @@ def main():
             # Fallback or alternative: domprob.goals() returns a set of Atom objects for simple goals
             # This might be useful if domprob.problem.goal is not populated or for simpler goal structures.
             print(
-                f"INFO: domprob.problem.goal not found or is None. Trying domprob.goals() for {args.pddl_problem_file}."
+                f"    INFO: domprob.problem.goal not found or is None. Trying domprob.goals() for {args.pddl_problem_file}."
             )
             goal_atoms_from_goals_method = domprob.goals()  # set of Atom objects
             if goal_atoms_from_goals_method:
@@ -279,7 +279,7 @@ def main():
                     pddlpy_pred_to_normalized_string(atom) for atom in goal_atoms_from_goals_method
                 }
             else:
-                print(f"WARNING: No goal predicates parsed from {args.pddl_problem_file} using either method.")
+                print(f"    WARNING: No goal predicates parsed from {args.pddl_problem_file} using either method.")
 
         state_trajectory_pred_strings_list = extract_states_from_val_output(
             args.val_output_file, initial_state_preds_normalized_set
@@ -327,10 +327,10 @@ def main():
             else (len(ordered_master_pred_list) if ordered_master_pred_list else "N/A")
         )
 
-        print(f"INFO: Successfully processed. Trajectory Length: {traj_len}. Vector dim: {vec_dim}")
-        print(f"INFO: Text trajectory saved to: {args.text_trajectory_output}")
-        print(f"INFO: Binary trajectory saved to: {args.binary_trajectory_output}")
-        print(f"INFO: Binary goal saved to: {args.binary_goal_output}")
+        print(f"    INFO: Successfully processed. Trajectory Length: {traj_len}. Vector dim: {vec_dim}")
+        print(f"    INFO: Text trajectory saved to: {args.text_trajectory_output}")
+        print(f"    INFO: Binary trajectory saved to: {args.binary_trajectory_output}")
+        print(f"    INFO: Binary goal saved to: {args.binary_goal_output}")
 
     except Exception as e:
         print(f"FATAL ERROR in parse_and_encode.py: {e}")

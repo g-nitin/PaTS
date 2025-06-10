@@ -1,10 +1,13 @@
-import glob
-import os
+import argparse
+import json  # For saving metrics
+import re  # For extracting num_blocks from filenames
+from pathlib import Path  # For more robust path handling
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from BlocksWorldValidator import BlocksWorldValidator
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, pad_sequence
 from torch.utils.data import DataLoader, Dataset
 
@@ -116,11 +119,68 @@ class PaTS_LSTM(nn.Module):
 
 
 # ** Dataset and DataLoader **
+def get_num_blocks_from_filename(filename_base):
+    """Extracts number of blocks from a filename like 'blocks_3_problem_1'."""
+    match = re.search(r"blocks_(\d+)_problem", filename_base)
+    if match:
+        return int(match.group(1))
+    return None  # Or raise error
+
+
 class BWTrajectoryDataset(Dataset):
-    def __init__(self, trajectory_files, goal_files):
-        self.trajectory_files = trajectory_files
-        self.goal_files = goal_files
-        assert len(self.trajectory_files) == len(self.goal_files), "Mismatch in trajectory and goal files"
+    def __init__(self, problem_basenames, pats_dataset_dir: Path, target_num_blocks: int):
+        self.problem_basenames = []
+        self.trajectory_files = []
+        self.goal_files = []
+        self.num_features = None
+        self.target_num_blocks = target_num_blocks
+
+        print(f"Initializing dataset for {target_num_blocks} blocks.")
+        processed_count = 0
+        skipped_count = 0
+
+        for basename in problem_basenames:
+            num_blocks_in_file = get_num_blocks_from_filename(basename)
+            if num_blocks_in_file != self.target_num_blocks:
+                skipped_count += 1
+                continue  # Skip files not matching the target number of blocks
+
+            traj_path = pats_dataset_dir / "trajectories_bin" / f"{basename}.traj.bin.npy"
+            goal_path = pats_dataset_dir / "trajectories_bin" / f"{basename}.goal.bin.npy"
+
+            if not traj_path.exists() or not goal_path.exists():
+                # print(f"Warning: Data files not found for {basename}. Skipping.")
+                skipped_count += 1
+                continue
+
+            # Determine num_features from the first valid file
+            if self.num_features is None:
+                try:
+                    temp_traj_data = np.load(traj_path)
+                    if temp_traj_data.ndim == 2 and temp_traj_data.shape[0] > 0:
+                        self.num_features = temp_traj_data.shape[1]
+                        print(
+                            f"Determined num_features = {self.num_features} from {traj_path} for {self.target_num_blocks} blocks."
+                        )
+                    else:
+                        print(f"Warning: Trajectory file {traj_path} is empty or malformed. Skipping {basename}.")
+                        skipped_count += 1
+                        continue
+                except Exception as e:
+                    print(f"Error loading {traj_path} to determine num_features: {e}. Skipping {basename}.")
+                    skipped_count += 1
+                    continue
+
+            self.problem_basenames.append(basename)
+            self.trajectory_files.append(traj_path)
+            self.goal_files.append(goal_path)
+            processed_count += 1
+
+        print(
+            f"Dataset initialized: Loaded {processed_count} problems for {target_num_blocks} blocks. Skipped {skipped_count} problems."
+        )
+        if processed_count == 0 and len(problem_basenames) > 0:
+            print(f"Warning: No problems loaded for {target_num_blocks} blocks. Check paths and file names.")
 
     def __len__(self):
         return len(self.trajectory_files)
@@ -128,48 +188,49 @@ class BWTrajectoryDataset(Dataset):
     def __getitem__(self, idx):
         traj_path = self.trajectory_files[idx]
         goal_path = self.goal_files[idx]
+        basename = self.problem_basenames[idx]
 
-        # Load binary encoded trajectory S_0, S_1, ..., S_T
-        # Shape: (L, F) where L is trajectory length
-        trajectory_np = np.load(traj_path)
+        try:
+            trajectory_np = np.load(traj_path)
+            goal_np = np.load(goal_path)
+        except Exception as e:
+            print(f"Error loading .npy files for {basename}: {e}. Returning None or dummy.")
+            # Handle error, e.g., by returning a dummy item or raising an error
+            # For now, let's try to skip by getting next item (simplistic)
+            return self.__getitem__((idx + 1) % len(self)) if len(self) > 0 else None
 
-        # Load binary encoded goal state S_G
-        # Shape: (F,)
-        goal_np = np.load(goal_path)
+        if trajectory_np.shape[0] < 1:  # Must have at least S0
+            print(f"Warning: Trajectory {traj_path} is empty. Skipping.")
+            return self.__getitem__((idx + 1) % len(self)) if len(self) > 0 else None
 
-        # Input sequence for LSTM: S_0, ..., S_{T-1}
-        # Target sequence for LSTM: S_1, ..., S_T
-        # Ensure trajectory has at least 2 states (S0, S1)
-        if trajectory_np.shape[0] < 2:
-            # This can happen if a plan is just 1 state (initial = goal) or empty.
-            # Handle by skipping or returning a dummy. For now, safe to assume valid plans.
-            if trajectory_np.shape[0] == 1:
-                input_seq_np = trajectory_np
-                target_seq_np = trajectory_np
-            else:  # Should not happen with FastDownward plans for non-trivial problems
-                raise ValueError(f"Warning: Trajectory {traj_path} has < 2 states.")
-
-        input_seq_np = trajectory_np[:-1, :]  # S_0 to S_{T-1}
-        target_seq_np = trajectory_np[1:, :]  # S_1 to S_T
+        if trajectory_np.shape[0] == 1:  # S0 is goal
+            input_seq_np = trajectory_np  # S0
+            target_seq_np = trajectory_np  # S0
+        else:  # trajectory_np.shape[0] > 1
+            input_seq_np = trajectory_np[:-1, :]  # S_0 to S_{T-1}
+            target_seq_np = trajectory_np[1:, :]  # S_1 to S_T
 
         return {
             "input_sequence": torch.FloatTensor(input_seq_np),
             "goal_state": torch.FloatTensor(goal_np),
             "target_sequence": torch.FloatTensor(target_seq_np),
-            "id": os.path.basename(traj_path),  # For debugging
+            "expert_trajectory": torch.FloatTensor(trajectory_np),  # Full S_0 to S_T
+            "id": basename,
         }
 
 
 def collate_fn(batch):
-    """
-    Pads sequences in a batch and prepares them for `pack_padded_sequence`.
-    """
+    # Filter out None items that might result from __getitem__ errors
+    batch = [item for item in batch if item is not None]
+    if not batch:
+        return None
+
     input_seqs = [item["input_sequence"] for item in batch]
     goal_states = torch.stack([item["goal_state"] for item in batch])
     target_seqs = [item["target_sequence"] for item in batch]
+    expert_trajectories = [item["expert_trajectory"] for item in batch]  # For evaluation
     ids = [item["id"] for item in batch]
 
-    # Get sequence lengths BEFORE padding
     lengths = torch.tensor([len(seq) for seq in input_seqs], dtype=torch.long)
 
     # Pad sequences
@@ -177,7 +238,9 @@ def collate_fn(batch):
     # and returns (max_seq_len, batch_size, features) if batch_first=False (default)
     # or (batch_size, max_seq_len, features) if batch_first=True
     padded_input_seqs = pad_sequence(input_seqs, batch_first=True, padding_value=0.0)
-    padded_target_seqs = pad_sequence(target_seqs, batch_first=True, padding_value=0.0)  # Pad with 0s
+    padded_target_seqs = pad_sequence(target_seqs, batch_first=True, padding_value=0.0)
+    # Expert trajectories are not directly fed to LSTM in this form, so padding them for convenience
+    # For evaluation, we typically process them one by one.
 
     return {
         "input_sequences": padded_input_seqs,
@@ -185,6 +248,7 @@ def collate_fn(batch):
         "target_sequences": padded_target_seqs,
         "lengths": lengths,
         "ids": ids,
+        "expert_trajectories": expert_trajectories,  # List of tensors
     }
 
 
@@ -202,6 +266,8 @@ def train_model(model, dataloader, num_epochs, learning_rate, model_save_path, c
         num_batches = 0
 
         for batch_idx, batch_data in enumerate(dataloader):
+            if batch_data is None:  # Skip if collate_fn returned None
+                continue
             input_seqs = batch_data["input_sequences"].to(DEVICE)
             goal_states = batch_data["goal_states"].to(DEVICE)
             target_seqs = batch_data["target_sequences"].to(DEVICE)
@@ -217,9 +283,15 @@ def train_model(model, dataloader, num_epochs, learning_rate, model_save_path, c
             # output_logits is (B, S_max, F), target_seqs is (B, S_max, F)
             mask = torch.zeros_like(target_seqs, dtype=torch.bool).to(DEVICE)
             for i, length in enumerate(lengths):
-                mask[i, :length, :] = True
+                if length > 0:  # Ensure length is positive
+                    mask[i, :length, :] = True
 
-            # Apply loss only on non-padded parts
+            if (
+                mask.float().sum() == 0
+            ):  # Avoid division by zero if all sequences in batch are empty (should not happen with good data)
+                print(f"Warning: Empty mask in batch {batch_idx}. Skipping loss calculation for this batch.")
+                continue
+
             loss_unreduced = criterion(output_logits, target_seqs)
             loss = (loss_unreduced * mask.float()).sum() / mask.float().sum()  # Average over non-padded elements
 
@@ -236,10 +308,14 @@ def train_model(model, dataloader, num_epochs, learning_rate, model_save_path, c
                     f"Epoch [{epoch + 1}/{num_epochs}], Batch [{batch_idx + 1}/{len(dataloader)}], Loss: {loss.item():.4f}"
                 )
 
+        if num_batches == 0:
+            print(f"Epoch [{epoch + 1}/{num_epochs}] had no batches with data. Skipping epoch.")
+            continue
+
         avg_epoch_loss = epoch_loss / num_batches
         scheduler.step(avg_epoch_loss)
         print(
-            f"Epoch [{epoch + 1}/{num_epochs}] completed. Average Loss: {avg_epoch_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
+            f"Epoch [{epoch + 1}/{num_epochs}] completed. Avg Loss: {avg_epoch_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
         )
 
         if avg_epoch_loss < best_loss:
@@ -250,9 +326,10 @@ def train_model(model, dataloader, num_epochs, learning_rate, model_save_path, c
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": best_loss,
-                    "num_features": model.num_features,  # Save for reloading
+                    "num_features": model.num_features,
                     "hidden_size": model.hidden_size,
                     "num_lstm_layers": model.num_lstm_layers,
+                    "target_num_blocks": getattr(model, "target_num_blocks", None),
                 },
                 model_save_path,
             )
@@ -278,12 +355,12 @@ def generate_plan_lstm(model, initial_state_np, goal_state_np, max_plan_length=5
         h_prev = torch.zeros(model.num_lstm_layers, 1, model.hidden_size).to(DEVICE)
         c_prev = torch.zeros(model.num_lstm_layers, 1, model.hidden_size).to(DEVICE)
 
-        generated_plan_states = [current_S_tensor.cpu().numpy().squeeze(0)]  # Store as numpy arrays
+        generated_plan_states_tensors = [current_S_tensor.clone()]
 
         for step in range(max_plan_length):
             next_S_binary, _, h_next, c_next = model.predict_step(current_S_tensor, goal_S_tensor, h_prev, c_prev)
 
-            generated_plan_states.append(next_S_binary.cpu().numpy().squeeze(0))
+            generated_plan_states_tensors.append(next_S_binary.clone())
             current_S_tensor = next_S_binary
             h_prev, c_prev = h_next, c_next
 
@@ -291,29 +368,119 @@ def generate_plan_lstm(model, initial_state_np, goal_state_np, max_plan_length=5
             if torch.equal(current_S_tensor, goal_S_tensor):
                 print(f"Goal reached at step {step + 1}.")
                 break
-            # Check for stagnation (optional, more complex)
-            # if len(generated_plan_states) > 2 and np.array_equal(generated_plan_states[-1], generated_plan_states[-2]):
-            #     print("Stagnation detected.")
-            #     break
-        else:  # Loop finished without break (max_plan_length reached)
-            print(f"Max plan length ({max_plan_length}) reached.")
 
-    return np.array(generated_plan_states)
+        # Convert list of tensors to a single numpy array (L, F)
+        generated_plan_np = torch.cat(generated_plan_states_tensors, dim=0).cpu().numpy()
+    return generated_plan_np
 
 
-# ** Main Execution Example (Illustrative) **
+def evaluate_on_test_set(model, test_dataloader, num_blocks_for_validator, max_plan_length_eval=50):
+    print("\n** Evaluating on Test Set using BlocksWorldValidator **")
+    model.eval()
+
+    validator = BlocksWorldValidator(num_blocks=num_blocks_for_validator)
+
+    all_generated_plans_list_of_lists = []
+    all_expert_plans_list_of_lists = []  # Targets for the validator
+    all_goal_states_list = []
+
+    total_problems = 0
+
+    for batch_data in test_dataloader:
+        if batch_data is None:
+            continue
+
+        ids = batch_data["ids"]
+        # For evaluation, we process one by one from the batch
+        for i in range(len(ids)):
+            problem_id = ids[i]
+            expert_trajectory_tensor = batch_data["expert_trajectories"][i]
+
+            if expert_trajectory_tensor.numel() == 0:
+                print(f"Skipping {problem_id} due to empty expert trajectory.")
+                continue
+
+            initial_state_np = expert_trajectory_tensor[0].cpu().numpy()  # S0
+            goal_state_np = batch_data["goal_states"][i].cpu().numpy()  # S_G from dataset item
+            expert_plan_full_np = expert_trajectory_tensor.cpu().numpy()  # S0, S1, ..., ST_expert
+
+            # print(f"Evaluating {problem_id}...")
+            generated_plan_np = generate_plan_lstm(model, initial_state_np, goal_state_np, max_plan_length_eval)
+
+            total_problems += 1
+
+            # Convert numpy arrays to List[List[int]] for the validator
+            generated_plan_as_list = [state.astype(int).tolist() for state in generated_plan_np]
+            expert_plan_as_list = [state.astype(int).tolist() for state in expert_plan_full_np]
+            goal_state_as_list = goal_state_np.astype(int).tolist()
+
+            all_generated_plans_list_of_lists.append(generated_plan_as_list)
+            all_expert_plans_list_of_lists.append(expert_plan_as_list)
+            all_goal_states_list.append(goal_state_as_list)
+
+    metrics = {}
+    if total_problems > 0:
+        print(f"Validator performing checks for {num_blocks_for_validator} blocks configuration.")
+        metrics = validator.compute_performance_metrics(
+            predictions=all_generated_plans_list_of_lists,
+            targets=all_expert_plans_list_of_lists,
+            goal_states=all_goal_states_list,
+        )
+        # You can add custom metrics or counts if needed, e.g.:
+        metrics["total_problems_processed_by_script"] = total_problems
+    else:
+        print("No problems were evaluated.")
+        # Initialize with keys expected from validator.compute_performance_metrics for consistency
+        metrics = {
+            "valid_sequence_rate": 0.0,
+            "goal_achievement_rate": 0.0,
+            "avg_sequence_length": 0.0,
+            "avg_changes_per_step": 0.0,
+            "exact_match_rate": 0.0,
+            "total_problems_processed_by_script": 0,
+        }
+
+    print("\n** Test Set Evaluation Summary (from BlocksWorldValidator) **")
+    for k, v_metric in metrics.items():
+        if isinstance(v_metric, float):
+            print(f"  {k}: {v_metric:.4f}")
+        else:
+            print(f"  {k}: {v_metric}")
+    return metrics
+
+
+# ** Helper to load problem basenames from split files **
+def load_problem_basenames(split_file_path: Path):
+    if not split_file_path.exists():
+        print(f"Warning: Split file not found: {split_file_path}")
+        return []
+    with open(split_file_path, "r") as f:
+        basenames = [line.strip() for line in f if line.strip()]
+    return basenames
+
+
+# ** Main Execution **
 if __name__ == "__main__":
-    # ** Parameters **
-    # These should be determined by your dataset, specifically the number of blocks
-    # For 3 blocks (A,B,C):
-    # A_on_table, B_on_table, C_on_table (3)
-    # A_on_B, A_on_C, B_on_A, B_on_C, C_on_A, C_on_B (6)
-    # A_clear, B_clear, C_clear (3)
-    # A_held, B_held, C_held (3)
-    # arm-empty (1) (Assuming this is part of your encoding, if not, adjust)
-    # Total for 3 blocks: 3+6+3+3+1 = 16 features (if arm-empty is included)
-    # Update this based on your actual parse_and_encode.py output for a given N
-    NUM_FEATURES_FOR_N_BLOCKS = 16  # Example for 3 blocks, adjust this!
+    parser = argparse.ArgumentParser(description="LSTM Training and Evaluation")
+    parser.add_argument("dataset_dir", type=str, help="Path to the dataset directory")
+    parser.add_argument("dataset_split", type=str, help="Path to the dataset split files")
+    parser.add_argument("output_dir", type=str, help="Path to the output directory")
+    args = parser.parse_args()
+
+    # ** Paths **
+    # Base directory for the original PDDL, plans, trajectories etc.
+    PATS_DATASET_DIR = Path(args.dataset_dir)
+    # Directory containing train_files.txt, val_files.txt, test_files.txt
+    DATA_ANALYZED_DIR = Path(args.dataset_split)
+    # Directory to save models and results for this LSTM script
+    LSTM_OUTPUT_DIR = Path(args.output_dir)
+    LSTM_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Parameters
+    # The script will filter data from split files for this specific N.
+    # A separate model will be trained for each N.
+    TARGET_NUM_BLOCKS = 4
+    NUM_FEATURES_FOR_N_BLOCKS = 25
     HIDDEN_SIZE = 128
     NUM_LSTM_LAYERS = 2
     DROPOUT_PROB = 0.2
@@ -321,185 +488,139 @@ if __name__ == "__main__":
     NUM_EPOCHS = 250
     BATCH_SIZE = 32
 
-    # Current dir
-    ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-    MODEL_SAVE_PATH = os.path.join(ROOT_DIR, "lstm", "pats_lstm_model.pth")
-    DATASET_BASE_DIR = "pats_dataset"
+    print(f"**** Script configured for TARGET_NUM_BLOCKS = {TARGET_NUM_BLOCKS} ****")
 
-    # ** 1. Data Preparation **
-    # Glob for trajectory and goal files.
-    # This assumes all .npy files in trajectories_bin and goals_bin are for the *same* number of blocks
-    # and thus have the same NUM_FEATURES_FOR_N_BLOCKS.
-    # AKA, assume training one model per N_BLOCKS configuration.
+    MODEL_SAVE_PATH = LSTM_OUTPUT_DIR / f"pats_lstm_model_N{TARGET_NUM_BLOCKS}.pth"
+    RESULTS_SAVE_PATH = LSTM_OUTPUT_DIR / f"test_results_N{TARGET_NUM_BLOCKS}.json"
 
-    # Example: find all files for a specific number of blocks, e.g., 3 blocks
-    # You might need to adjust the glob pattern if your naming is different or includes N directly
-    # For example, if files are named 'blocks_3_problem_X.traj.bin.npy'
-    num_blocks_for_training = 3  # Set this to the N you are training for
-    print(f"Looking for data for {num_blocks_for_training} blocks...")
+    # ** 1. Data Preparation using split files **
+    train_basenames_all = load_problem_basenames(DATA_ANALYZED_DIR / "train_files.txt")
+    val_basenames_all = load_problem_basenames(DATA_ANALYZED_DIR / "val_files.txt")
+    test_basenames_all = load_problem_basenames(DATA_ANALYZED_DIR / "test_files.txt")
 
-    # Adjust glob patterns based on your exact file naming from generate_dataset.sh
-    # This pattern assumes files like 'blocks_3_problem_1.traj.bin.npy'
-    # If your script produces 'blocks_03_...' or similar, adjust the pattern.
-    # The '*' will match any problem ID.
-    traj_pattern = os.path.join(
-        DATASET_BASE_DIR, "trajectories_bin", f"blocks_{num_blocks_for_training}_problem_*.traj.bin.npy"
-    )
-    goal_pattern = os.path.join(
-        DATASET_BASE_DIR, "trajectories_bin", f"blocks_{num_blocks_for_training}_problem_*.goal.bin.npy"
-    )  # Goal files are also in trajectories_bin as per your description
-
-    all_traj_files = sorted(glob.glob(traj_pattern))
-    all_goal_files = sorted(glob.glob(goal_pattern))
-
-    # Sanity check: ensure corresponding files exist
-    # The goal file name should match the trajectory file name (except for .goal vs .traj)
-    # Your structure says:
-    # trajectories_bin/blocks_<N>_problem_<M>.traj.bin.npy
-    # trajectories_bin/blocks_<N>_problem_<M>.goal.bin.npy
-    # So the glob patterns above should work if the base names match.
-    # Let's refine the file matching to be absolutely sure:
-
-    valid_traj_files = []
-    valid_goal_files = []
-    for traj_f in all_traj_files:
-        # Construct expected goal file name from trajectory file name
-        base_name = os.path.basename(traj_f).replace(".traj.bin.npy", ".goal.bin.npy")
-        expected_goal_f = os.path.join(os.path.dirname(traj_f), base_name)  # Goals are in the same dir
-        if os.path.exists(expected_goal_f):
-            valid_traj_files.append(traj_f)
-            valid_goal_files.append(expected_goal_f)
-        else:
-            print(f"Warning: Goal file not found for {traj_f}: expected {expected_goal_f}")
-
-    if not valid_traj_files:
-        print(
-            f"No trajectory/goal pairs found for {num_blocks_for_training} blocks with pattern: {traj_pattern}. Exiting."
-        )
-        print("Please check your DATASET_BASE_DIR, num_blocks_for_training, and file naming.")
+    if not train_basenames_all:
+        print("No training files loaded. Exiting.")
         exit()
 
-    print(f"Found {len(valid_traj_files)} trajectory/goal pairs for {num_blocks_for_training} blocks.")
+    # Create datasets filtered for TARGET_NUM_BLOCKS
+    # The dataset class itself will handle filtering and determine num_features
+    train_dataset = BWTrajectoryDataset(train_basenames_all, PATS_DATASET_DIR, TARGET_NUM_BLOCKS)
 
-    # Determine NUM_FEATURES_FOR_N_BLOCKS dynamically from the first file if not hardcoded
-    # This is safer.
-    temp_traj = np.load(valid_traj_files[0])
-    ACTUAL_NUM_FEATURES = temp_traj.shape[1]
-    print(f"Dynamically determined NUM_FEATURES: {ACTUAL_NUM_FEATURES}")
-    if (
-        NUM_FEATURES_FOR_N_BLOCKS != ACTUAL_NUM_FEATURES and NUM_FEATURES_FOR_N_BLOCKS is not None
-    ):  # if it was hardcoded
+    # Ensure num_features was set (i.e., at least one valid problem was found)
+    if train_dataset.num_features is None:
         print(
-            f"Warning: Hardcoded NUM_FEATURES_FOR_N_BLOCKS ({NUM_FEATURES_FOR_N_BLOCKS}) "
-            f"does not match data ({ACTUAL_NUM_FEATURES}). Using data's value."
+            f"Could not determine num_features for {TARGET_NUM_BLOCKS} blocks from training data. "
+            "Ensure train_files.txt contains valid problems for this N and files exist."
         )
-    NUM_FEATURES_FOR_N_BLOCKS = ACTUAL_NUM_FEATURES
+        exit()
 
-    # Split into train/validation (e.g., 80/20)
-    # Ensure consistent shuffling if you run this multiple times
-    np.random.seed(42)
-    indices = np.arange(len(valid_traj_files))
-    np.random.shuffle(indices)
-    split_idx = int(len(indices) * 0.8)
+    ACTUAL_NUM_FEATURES = train_dataset.num_features
+    print(f"Using ACTUAL_NUM_FEATURES = {ACTUAL_NUM_FEATURES} for N={TARGET_NUM_BLOCKS}")
 
-    train_indices = indices[:split_idx]
-    val_indices = indices[split_idx:]
+    # Add a validation check for feature size consistency
+    temp_validator_for_check = BlocksWorldValidator(num_blocks=TARGET_NUM_BLOCKS)
+    expected_features_by_validator = temp_validator_for_check.state_size
+    if ACTUAL_NUM_FEATURES != expected_features_by_validator:
+        print(f"CRITICAL ERROR: Feature size mismatch for N={TARGET_NUM_BLOCKS}!")
+        print(
+            f"  Dataset (e.g., from {train_dataset.trajectory_files[0] if train_dataset.trajectory_files else 'N/A'}) reports {ACTUAL_NUM_FEATURES} features."
+        )
+        print(
+            f"  BlocksWorldValidator expects {expected_features_by_validator} features for {TARGET_NUM_BLOCKS} blocks."
+        )
+        print(
+            "  This indicates an inconsistency between data generation/encoding (parse_and_encode.py) and the validator's setup."
+        )
+        print("  Please ensure the predicate vocabulary and order match.")
+        exit(1)  # Critical error, should not proceed
+    print(
+        f"Feature size consistency check passed: Dataset features ({ACTUAL_NUM_FEATURES}) == Validator expected features ({expected_features_by_validator}) for N={TARGET_NUM_BLOCKS}."
+    )
+    del temp_validator_for_check  # Clean up
 
-    train_traj_files = [valid_traj_files[i] for i in train_indices]
-    train_goal_files = [valid_goal_files[i] for i in train_indices]
-    val_traj_files = [valid_traj_files[i] for i in val_indices]
-    val_goal_files = [valid_goal_files[i] for i in val_indices]
+    val_dataset = BWTrajectoryDataset(val_basenames_all, PATS_DATASET_DIR, TARGET_NUM_BLOCKS)
+    test_dataset = BWTrajectoryDataset(test_basenames_all, PATS_DATASET_DIR, TARGET_NUM_BLOCKS)
 
-    train_dataset = BWTrajectoryDataset(train_traj_files, train_goal_files)
-    val_dataset = BWTrajectoryDataset(val_traj_files, val_goal_files)  # For validation later
+    if len(train_dataset) == 0:
+        print(f"No training data loaded for N={TARGET_NUM_BLOCKS}. Check dataset paths and split files. Exiting.")
+        exit()
 
     train_dataloader = DataLoader(
-        train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=2
+        train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=0
     )
-    # val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
+    val_dataloader = DataLoader(
+        val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0
+    )
+    test_dataloader = DataLoader(
+        test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0
+    )
 
     # ** 2. Model Initialization **
-    model = PaTS_LSTM(NUM_FEATURES_FOR_N_BLOCKS, HIDDEN_SIZE, NUM_LSTM_LAYERS, DROPOUT_PROB).to(DEVICE)
+    model = PaTS_LSTM(ACTUAL_NUM_FEATURES, HIDDEN_SIZE, NUM_LSTM_LAYERS, DROPOUT_PROB).to(DEVICE)
+    setattr(model, "target_num_blocks", TARGET_NUM_BLOCKS)  # Store N in model for reference
     print(model)
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total trainable parameters: {total_params}")
 
     # ** 3. Training **
-    # Check if you want to train or load a pre-trained model
-    TRAIN_NEW_MODEL = True  # Set to False to skip training and go to inference (if model exists)
-
-    if TRAIN_NEW_MODEL:
-        print("Starting training...")
-        train_model(model, train_dataloader, NUM_EPOCHS, LEARNING_RATE, MODEL_SAVE_PATH)
+    DO_TRAINING = True  # Set to False to skip training and only evaluate (if model exists)
+    CLIP_GRAD_NORM = 1.0  # Gradient clipping norm, can be None to disable
+    if DO_TRAINING:
+        print(f"Starting training for N={TARGET_NUM_BLOCKS}...")
+        train_model(model, train_dataloader, NUM_EPOCHS, LEARNING_RATE, MODEL_SAVE_PATH, CLIP_GRAD_NORM)
     else:
         print(f"Skipping training. Attempting to load model from {MODEL_SAVE_PATH}")
-        if os.path.exists(MODEL_SAVE_PATH):
-            checkpoint = torch.load(MODEL_SAVE_PATH, map_location=DEVICE)
-            # Ensure model architecture matches saved model
-            loaded_num_features = checkpoint.get("num_features", NUM_FEATURES_FOR_N_BLOCKS)  # Fallback for older saves
-            loaded_hidden_size = checkpoint.get("hidden_size", HIDDEN_SIZE)
-            loaded_num_lstm_layers = checkpoint.get("num_lstm_layers", NUM_LSTM_LAYERS)
 
-            if (
-                loaded_num_features != NUM_FEATURES_FOR_N_BLOCKS
-                or loaded_hidden_size != HIDDEN_SIZE
-                or loaded_num_lstm_layers != NUM_LSTM_LAYERS
-            ):
-                print("Warning: Model architecture in checkpoint differs from current parameters.")
-                print("Re-initializing model with checkpoint parameters.")
-                NUM_FEATURES_FOR_N_BLOCKS = loaded_num_features
-                HIDDEN_SIZE = loaded_hidden_size
-                NUM_LSTM_LAYERS = loaded_num_lstm_layers
-                model = PaTS_LSTM(NUM_FEATURES_FOR_N_BLOCKS, HIDDEN_SIZE, NUM_LSTM_LAYERS, DROPOUT_PROB).to(DEVICE)
+    # ** 4. Evaluation on Test Set **
+    if Path(MODEL_SAVE_PATH).exists():
+        print(f"Loading model from {MODEL_SAVE_PATH} for evaluation...")
+        checkpoint = torch.load(MODEL_SAVE_PATH, map_location=DEVICE)
 
-            model.load_state_dict(checkpoint["model_state_dict"])
+        # Check if loaded model matches current config (especially num_features for the target N)
+        loaded_num_features = checkpoint.get("num_features")
+        loaded_target_n_blocks = checkpoint.get("target_num_blocks", None)
+
+        if loaded_target_n_blocks is not None and loaded_target_n_blocks != TARGET_NUM_BLOCKS:
             print(
-                f"Model loaded successfully from {MODEL_SAVE_PATH}. Epoch: {checkpoint.get('epoch', 'N/A')}, Loss: {checkpoint.get('loss', 'N/A'):.4f}"
+                f"Warning: Model {MODEL_SAVE_PATH} was trained for N={loaded_target_n_blocks}, "
+                f"but current evaluation is for N={TARGET_NUM_BLOCKS}. Results might be misleading."
             )
-        else:
-            print(f"Model file not found at {MODEL_SAVE_PATH}. Please train first or check path.")
+
+        if loaded_num_features != ACTUAL_NUM_FEATURES:
+            print(
+                f"Error: Num features mismatch! Model trained with {loaded_num_features}, "
+                f"current data for N={TARGET_NUM_BLOCKS} has {ACTUAL_NUM_FEATURES}. Cannot evaluate."
+            )
             exit()
 
-    # ** 4. Inference Example **
-    if len(val_dataset) > 0:
-        print("\n** Running Inference on a validation sample **")
-        sample_idx = 0  # Take the first validation sample
-        sample_data = val_dataset[sample_idx]
+        model.load_state_dict(checkpoint["model_state_dict"])
+        print(f"Model loaded. Epoch: {checkpoint.get('epoch', 'N/A')}, Loss: {checkpoint.get('loss', 'N/A'):.4f}")
 
-        initial_state_np = sample_data["input_sequence"][0].numpy()  # S_0 from the trajectory
-        goal_state_np = sample_data["goal_state"].numpy()
-        expert_trajectory_np = np.vstack((initial_state_np, sample_data["target_sequence"].numpy()))
+        if len(test_dataset) > 0:
+            # Determine max plan length for evaluation dynamically or set a generous fixed one
+            # For dynamic, you might iterate through test_dataset once to find max expert plan length
+            max_expert_len = 0
+            for item_idx in range(len(test_dataset)):
+                item = test_dataset[item_idx]
+                if item and item["expert_trajectory"] is not None:
+                    max_expert_len = max(max_expert_len, len(item["expert_trajectory"]))
 
-        print(f"Problem ID for inference: {sample_data['id']}")
-        print(f"Initial State (first few features): {initial_state_np[:10]}...")
-        print(f"Goal State (first few features): {goal_state_np[:10]}...")
+            max_plan_length_for_eval = max_expert_len + 15 if max_expert_len > 0 else 50  # Add some slack
+            print(
+                f"Max expert plan length in test set: {max_expert_len}. Using max_plan_length_for_eval = {max_plan_length_for_eval}"
+            )
 
-        generated_plan = generate_plan_lstm(
-            model,
-            initial_state_np,
-            goal_state_np,
-            max_plan_length=len(expert_trajectory_np) + 10,  # Give some slack
-            num_features=NUM_FEATURES_FOR_N_BLOCKS,
-        )
+            test_metrics = evaluate_on_test_set(
+                model, test_dataloader, TARGET_NUM_BLOCKS, max_plan_length_eval=max_plan_length_for_eval
+            )
 
-        print(f"\nGenerated Plan (length {len(generated_plan)}):")
-        # for i, state_vec in enumerate(generated_plan):
-        #     print(f"Step {i}: {state_vec[:10]}...") # Print first few features
-
-        # Basic evaluation:
-        plan_is_valid_trajectory = True  # Placeholder for actual validation
-        reached_goal = np.array_equal(generated_plan[-1], goal_state_np)
-        plan_length = len(generated_plan) - 1  # Number of actions
-
-        print(f"\nInference Summary for {sample_data['id']}:")
-        print(f"  Expert plan length: {len(expert_trajectory_np) - 1}")
-        print(f"  Generated plan length: {plan_length}")
-        print(f"  Reached goal: {reached_goal}")
-
-        # To calculate planning accuracy as in your abstract, you'd need to:
-        # 1. Run inference on all problems in a test set.
-        # 2. For each problem, check if the generated plan reaches the goal.
-        # 3. Check if all intermediate states in the generated plan are valid (this is harder, might need VAL or a domain checker).
-        # Planning Accuracy = (Number of problems where a valid plan reaching the goal was found) / (Total test problems)
+            # Save metrics to JSON
+            with open(RESULTS_SAVE_PATH, "w") as f:
+                json.dump(test_metrics, f, indent=4)
+            print(f"Test metrics saved to {RESULTS_SAVE_PATH}")
+        else:
+            print(f"No test data found for N={TARGET_NUM_BLOCKS} to evaluate.")
     else:
-        print("No validation data to run inference on.")
+        print(f"Model file not found at {MODEL_SAVE_PATH}. Cannot evaluate.")
+
+    print(f"**** Script for TARGET_NUM_BLOCKS = {TARGET_NUM_BLOCKS} finished. ****")

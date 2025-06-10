@@ -25,7 +25,8 @@ class BlocksWorldValidator:
         self.on_table_indices = {}
         self.on_block_indices = {}
         self.clear_indices = {}
-        self.held_indices = {}
+        # self.held_indices = {}
+        # self.arm_empty_index will be a single integer
 
         idx = 0
         # On table indices
@@ -45,7 +46,12 @@ class BlocksWorldValidator:
             self.clear_indices[block] = idx
             idx += 1
 
+        # Arm empty index
+        self.arm_empty_index = idx
+        idx += 1
+
         # Held indices
+        self.held_indices = {}  # Initialize
         for block in blocks:
             self.held_indices[block] = idx
             idx += 1
@@ -92,6 +98,27 @@ class BlocksWorldValidator:
                         if state[self.on_block_indices[(other, block)]] == 1:
                             violations.append(f"Block {block} marked as clear but has {other} on top")
 
+            # Check arm-empty and holding consistency
+            num_held_blocks = 0
+            for block_char_code in range(ord("A"), ord("A") + self.num_blocks):
+                block = chr(block_char_code)
+                if state[self.held_indices[block]] == 1:
+                    num_held_blocks += 1
+
+            is_arm_empty_predicate_true = state[self.arm_empty_index] == 1
+
+            if num_held_blocks > 1:
+                violations.append("Arm is holding multiple blocks.")
+
+            if is_arm_empty_predicate_true:
+                if num_held_blocks > 0:
+                    violations.append("Arm-empty predicate is true, but arm is holding block(s).")
+            else:  # Arm-empty predicate is false (i.e., arm should be holding something)
+                if num_held_blocks == 0:
+                    violations.append("Arm-empty predicate is false, but arm is not holding any block.")
+                # If num_held_blocks > 1, it's already caught above.
+                # If num_held_blocks == 1, this is consistent.
+
         return len(violations) == 0, violations
 
     def _has_cycle(self, state: List[int], start_block: str, visited: Set[str]) -> bool:
@@ -119,10 +146,11 @@ class BlocksWorldValidator:
 
         if differences == 0:
             violations.append("No change between states")
-        # A single action (pickup, putdown, stack, unstack) changes 3 or 4 features.
-        elif differences < 3 or differences > 4:
+        # A single action (pickup, putdown) changes 4 features.
+        # A single action (stack, unstack) changes 5 features.
+        elif differences < 4 or differences > 5:
             violations.append(
-                f"Illegal number of changes ({differences} bits changed). Expected 3 or 4 for a single action, or 0 if at goal."
+                f"Illegal number of changes ({differences} bits changed). Expected 4 or 5 for a single action, or 0 if at goal."
             )
 
         return len(violations) == 0, violations
@@ -257,50 +285,69 @@ class BlocksWorldValidator:
 # Example usage
 if __name__ == "__main__":
     # Example with 2 blocks
-    validator = BlocksWorldValidator(num_blocks=2)
+    validator = BlocksWorldValidator(num_blocks=2)  # state_size should be 9
+    print(f"Validator for 2 blocks expects state size: {validator.state_size}")
 
-    # Valid state: A on table, B on A, A not clear, B clear
+    # fmt: off
+
+    # Valid state: A on table, B on A, A not clear, B clear, arm empty
+    # Indices for 2 blocks (A, B) with arm-empty:
+    # on_table_indices: A=0, B=1
+    # on_block_indices: (A,B)=2, (B,A)=3
+    # clear_indices: A=4, B=5
+    # arm_empty_index: 6
+    # held_indices: A=7, B=8
     valid_state = [
-        1,
-        0,  # A,B on table
-        0,
-        1,  # A on B, B on A
-        0,
-        1,  # A,B clear
-        0,
-        0,
-    ]  # A,B held
+        1, 0,  # A on table, B not
+        0, 1,  # A not on B, B on A
+        0, 1,  # A not clear, B clear
+        1,      # Arm empty
+        0, 0,  # A not held, B not held
+    ]
+    # Corrected: A on table (1), B not on table (0). B on A (1). A not clear (0), B clear (1). Arm empty (1). Nothing held (0,0).
+    # valid_state = [1,0, 0,1, 0,1, 1, 0,0] # This matches the derivation
 
-    # Invalid state: A floating
-    invalid_state = [
-        0,
-        0,  # A,B on table
-        0,
-        0,  # A on B, B on A
-        1,
-        1,  # A,B clear
-        0,
-        0,
-    ]  # A,B held
+    # Invalid state: A floating, arm empty (but A is not on anything or held)
+    invalid_state_floating_A = [
+        0, 0,  # A not on table, B not on table
+        0, 0,  # A not on B, B not on A
+        1, 1,  # A clear, B clear
+        1,      # Arm empty
+        0, 0,  # A not held, B not held
+    ]
 
-    # Test physical constraints
+    # Invalid state: Arm empty, but A is held
+    invalid_state_arm_empty_A_held = [
+        0, 1,  # A not on table, B on table
+        0, 0,  # No on_block relations
+        0, 1,  # A not clear (because held), B clear
+        1,      # Arm empty (Error!)
+        1, 0,  # A held (Error!), B not held
+    ]
+
+    # fmt: on
+
     valid, violations = validator._check_physical_constraints(valid_state)
     print(f"Valid state check - Is valid: {valid}, Violations: {violations}")
 
-    valid, violations = validator._check_physical_constraints(invalid_state)
-    print(f"Invalid state check - Is valid: {valid}, Violations: {violations}")
+    valid, violations = validator._check_physical_constraints(invalid_state_floating_A)
+    print(f"Invalid state (floating A) check - Is valid: {valid}, Violations: {violations}")
+
+    valid, violations = validator._check_physical_constraints(invalid_state_arm_empty_A_held)
+    print(f"Invalid state (arm empty, A held) check - Is valid: {valid}, Violations: {violations}")
 
     # Test sequence validation
-    sequence = [
-        valid_state,
-        # Next state: Both blocks on table
-        [1, 1, 0, 0, 1, 1, 0, 0],
-    ]
-    goal_state = [1, 1, 0, 0, 1, 1, 0, 0]
+    # State 1: A on table, B on table, A clear, B clear, arm empty
+    s1 = [1, 1, 0, 0, 1, 1, 1, 0, 0]
+    # Action: pickup A
+    # State 2: B on table, B clear, arm NOT empty, A held
+    s2 = [0, 1, 0, 0, 0, 1, 0, 1, 0]  # A not clear, B clear, arm not empty, A held, B not on table
+
+    sequence = [s1, s2]
+    goal_state = s2
 
     result = validator.validate_sequence(sequence, goal_state)
     print("\nSequence validation result:")
     print(f"Is valid: {result.is_valid}")
     print(f"Violations: {result.violations}")
-    print(f"Metrics: {result.metrics}")
     print(f"Metrics: {result.metrics}")

@@ -23,7 +23,7 @@
         python generate_plans.py --help
         ```
 
-- `ttm_trainer.py`:
+- `models/ttm.py`:
 
     To use this script:
 

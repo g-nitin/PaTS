@@ -37,26 +37,30 @@ After generation, `data/blocks_<N>/` will contain the PDDL files, plans, VAL log
 
 ### 2. Training a Model (Example: TTM)
 
-(Assumes dataset for N=4 blocks has been generated and `data/blocks_4/train_files.txt` etc. exist, and TTM uses a JSON file that lists these trajectories)
+(Assumes dataset for N=4 blocks has been generated and `data/blocks_4/train_files.txt`, `data/blocks_4/predicate_manifest_4.txt`, etc. exist)
 
-The TTM script (`scripts/models/ttm.py`) expects a JSON dataset file that aggregates information from multiple problem instances. You would typically create this JSON file as a preprocessing step, listing paths to the `.traj.bin.npy` and `.goal.bin.npy` files, or embedding the data directly.
-
-Let's assume you have `data/blocks_4/blocksworld_N4_ttm_dataset.json`.
+The TTM script (`scripts/models/ttm.py`) now directly uses the split files (`train_files.txt`, `val_files.txt`) and the predicate manifest, similar to the LSTM script. It requires paths to the dataset directory (containing `trajectories_bin/` and `predicate_manifest_<N>.txt`) and the dataset split directory (containing `train_files.txt`, etc.), along with the number of blocks.
 
 ```bash
 # From the project root directory
-uv run python scripts/models/ttm.py train \
-    --dataset_file data/blocks_4/blocksworld_N4_ttm_dataset.json \
-    --output_dir ./output_ttm_N4 \
+uv run python scripts/models/ttm.py \
+    --dataset_dir data/blocks_4 \
+    --dataset_split_dir data/blocks_4 \
+    --num_blocks 4 \
+    --output_dir ./output_ttm_N4_new \
     --num_epochs 100 \
     --batch_size 32 \
     --learning_rate 1e-4 \
-    --context_length 60 \
-    --prediction_length 60 \
+    # --context_length 60 \ # Optional: TTM can auto-determine this
+    # --prediction_length 60 \ # Optional: TTM can auto-determine this
     --seed 42
 ```
 
-This will train a TTM model and save its assets (weights, config) into `./output_ttm_N4/final_model_assets/`.
+- The first `data/blocks_4` is `dataset_dir` (where `trajectories_bin/` and `predicate_manifest_4.txt` are).
+- The second `data/blocks_4` is `dataset_split_dir` (where `train_files.txt` is).
+- `./output_ttm_N4_new` is the output directory for the model.
+
+This will train a TTM model and save its assets (weights, config) into `./output_ttm_N4_new/N4/final_model_assets/`.
 
 ### 3. Training a Model (Example: LSTM)
 

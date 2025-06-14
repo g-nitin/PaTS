@@ -7,14 +7,15 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path, PosixPath
 from pprint import pformat
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+from helpers import get_num_blocks_from_filename
 from loguru import logger
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
-from torch.utils.data import Dataset, random_split
+from torch.utils.data import Dataset
 from torch.utils.tensorboard.writer import SummaryWriter
 from transformers.modeling_utils import PreTrainedModel
 from transformers.trainer import Trainer
@@ -54,15 +55,6 @@ class ModelConfig:
     state_dim: Optional[int] = None  # Will be set during training or loaded
 
 
-@dataclass
-class BlocksWorldSample:
-    initial_state: List[int]
-    goal_state: List[int]
-    plan: List[List[int]]  # Sequence of state vectors
-    actions: List[List[str]]  # Sequence of action descriptions
-    feature_names: List[str]
-
-
 # Callback class for custom TensorBoard logging
 class TensorBoardLoggingCallback(TrainerCallback):
     def __init__(self, tb_writer: SummaryWriter):
@@ -87,68 +79,102 @@ class TensorBoardLoggingCallback(TrainerCallback):
 
 # ** Dataset Class **
 class BlocksWorldDataset(Dataset):
-    def __init__(self, data_path: str, context_length: int, prediction_length: int):
+    def __init__(
+        self,
+        problem_basenames: List[str],
+        pats_dataset_dir: Path,
+        context_length: int,
+        prediction_length: int,
+        num_blocks: int,
+    ):
         self.context_length: int = context_length
         self.prediction_length: int = prediction_length
+        self.pats_dataset_dir: Path = pats_dataset_dir
+        self.num_blocks = num_blocks
 
-        logger.info(f"Loading dataset from: {data_path}")
-        with open(data_path, "r") as f:
-            raw_data = json.load(f)["plans"]
+        logger.info(f"Initializing BlocksWorldDataset for {num_blocks} blocks from {pats_dataset_dir}.")
+        logger.info(f"Context length: {context_length}, Prediction length: {prediction_length}")
 
-        self.samples: List[BlocksWorldSample] = []
-        for item in raw_data:
-            sample = BlocksWorldSample(
-                initial_state=item["initial_state"],
-                goal_state=item["goal_state"],
-                plan=item["plan"],
-                actions=item["actions"],
-                feature_names=item["feature_names"],
-            )
-            self.samples.append(sample)
+        # Determine state_dim from predicate_manifest_<N>.txt
+        manifest_file = self.pats_dataset_dir / f"predicate_manifest_{self.num_blocks}.txt"
+        if not manifest_file.is_file():
+            raise FileNotFoundError(f"Predicate manifest file not found: {manifest_file}")
+        with open(manifest_file, "r") as f:
+            self.state_dim: int = len([line for line in f if line.strip()])
+        if self.state_dim == 0:
+            raise ValueError(f"State dimension is 0. Manifest file {manifest_file} might be empty or invalid.")
+        logger.info(f"Determined state_dim = {self.state_dim} from {manifest_file}")
 
-        if not self.samples:
-            raise ValueError(f"No samples found in dataset: {data_path}")
+        self.trajectory_files: List[Path] = []
+        self.goal_files: List[Path] = []
+        self.loaded_problem_basenames: List[str] = []
 
-        # Get dimensionality from first sample
-        self.state_dim: int = len(self.samples[0].initial_state)
-        logger.info(f"Dataset loaded: {len(self.samples)} samples, state_dim={self.state_dim}")
+        processed_count = 0
+        skipped_count = 0
+        for basename in problem_basenames:
+            traj_path = self.pats_dataset_dir / "trajectories_bin" / f"{basename}.traj.bin.npy"
+            goal_path = self.pats_dataset_dir / "trajectories_bin" / f"{basename}.goal.bin.npy"
 
-        # Log a note about future_observed_mask padding strategy
-        logger.debug(
-            "Future values padding: Using mask=1.0 for goal_state padding in future_values. "
-            "Loss WILL BE COMPUTED for these padded steps, enforcing goal prediction. "
-            "This change was made to avoid issues with empty tensors on MPS backend when the mask might otherwise be all zeros."
-        )
+            if not traj_path.exists() or not goal_path.exists():
+                # logger.debug(f"Data files missing for {basename}. Skipping.")
+                skipped_count += 1
+                continue
+
+            # Sanity check trajectory file
+            try:
+                temp_traj = np.load(traj_path)
+                if temp_traj.ndim != 2 or temp_traj.shape[1] != self.state_dim or temp_traj.shape[0] == 0:
+                    logger.warning(
+                        f"Trajectory file {traj_path} malformed or empty. Shape: {temp_traj.shape}, Expected dim: {self.state_dim}. Skipping."
+                    )
+                    skipped_count += 1
+                    continue
+            except Exception as e:
+                logger.warning(f"Error loading or validating trajectory {traj_path}: {e}. Skipping.")
+                skipped_count += 1
+                continue
+
+            self.trajectory_files.append(traj_path)
+            self.goal_files.append(goal_path)
+            self.loaded_problem_basenames.append(basename)
+            processed_count += 1
+
+        logger.info(f"Dataset initialized: Loaded {processed_count} problems. Skipped {skipped_count} problems.")
+        if processed_count == 0 and len(problem_basenames) > 0:
+            logger.error(f"No problems loaded for {self.num_blocks} blocks. Check paths and file names.")
+            # Consider raising an error if no data is loaded, as training cannot proceed.
+            raise ValueError("No data loaded for training.")
 
     def _scale_binary_array(self, data_array_np: np.ndarray) -> np.ndarray:
         """Scales a numpy array of 0s and 1s to -1s and 1s."""
         return data_array_np * 2.0 - 1.0
 
-    def __len__(self):  # Length of the Dataset
-        return len(self.samples)
+    def __len__(self):
+        return len(self.trajectory_files)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        sample = self.samples[idx]
+        traj_path = self.trajectory_files[idx]
+        goal_path = self.goal_files[idx]
 
-        plan_states_np_orig = np.array(sample.plan, dtype=np.float32)  # 0/1
-        goal_state_np_orig = np.array(sample.goal_state, dtype=np.float32)  # 0/1
+        try:
+            plan_states_np_orig = np.load(traj_path).astype(np.float32)  # Full trajectory S0...ST (0/1)
+            goal_state_np_orig = np.load(goal_path).astype(np.float32)  # Goal state SG (0/1)
+        except Exception as e:
+            logger.error(f"Error loading .npy files ({traj_path}, {goal_path}): {e}. Returning dummy or re-raising.")
+            # This should ideally not happen if constructor checks files.
+            # For robustness, could return a dummy item or skip, but better to ensure data quality.
+            raise IOError(f"Failed to load data for index {idx}: {traj_path.name}") from e
 
-        # initial_state_np_orig will be plan_states_np_orig[0] if plan is not empty
-        # Handle empty plan case for initial_state_np_orig if necessary, though current logic assumes plan[0] is initial.
-        # For safety, let's ensure initial_state_np_orig is explicitly defined.
-        if len(sample.plan) > 0:
-            initial_state_np_orig = np.array(sample.plan[0], dtype=np.float32)
-        else:  # Should not happen with current plan generator, but good for robustness
-            initial_state_np_orig = np.array(sample.initial_state, dtype=np.float32)
+        if plan_states_np_orig.shape[0] == 0:  # Should be caught by constructor
+            raise ValueError(f"Empty trajectory loaded for {traj_path.name}")
+
+        initial_state_np_orig = plan_states_np_orig[0]  # S0
 
         # Past values and mask (populated with 0/1)
         past_values_np = np.zeros((self.context_length, self.state_dim), dtype=np.float32)
         past_observed_mask_np = np.zeros((self.context_length, self.state_dim), dtype=np.float32)
 
-        # Number of actual plan steps to copy into the context window
-        num_plan_steps_for_context = 0
-        if len(plan_states_np_orig) > 0:
-            num_plan_steps_for_context = min(len(plan_states_np_orig), self.context_length)
+        num_plan_steps_for_context = min(len(plan_states_np_orig), self.context_length)
 
         if num_plan_steps_for_context > 0:
             # Copy the actual plan steps
@@ -163,9 +189,7 @@ class BlocksWorldDataset(Dataset):
 
                 padding_values = np.tile(last_observed_state_in_context, (num_past_padding, 1))
                 past_values_np[num_plan_steps_for_context:] = padding_values
-                # The mask for these padded values (past_observed_mask_np[num_plan_steps_for_context:]) correctly remains 0.0 as initialized.
-        elif self.context_length > 0:  # No plan steps, context length > 0
-            # Pad with a neutral value, e.g., the initial state if available and meaningful, or zeros.
+        elif self.context_length > 0:  # No plan steps from plan_states_np_orig fit or plan is S0 only
             padding_values = np.tile(initial_state_np_orig, (self.context_length, 1))
             past_values_np[:] = padding_values
             # past_observed_mask_np remains 0.0 for these padded initial states
@@ -174,11 +198,15 @@ class BlocksWorldDataset(Dataset):
         future_values_np = np.zeros((self.prediction_length, self.state_dim), dtype=np.float32)
         future_observed_mask_np = np.zeros((self.prediction_length, self.state_dim), dtype=np.float32)
 
-        target_future_plan_states_orig = []
-        if len(plan_states_np_orig) > self.context_length:  # If plan extends beyond context
-            target_future_plan_states_orig = plan_states_np_orig[self.context_length :]
+        target_future_plan_states_orig_list = []
+        if len(plan_states_np_orig) > self.context_length:
+            target_future_plan_states_orig_list = plan_states_np_orig[self.context_length :]
 
-        num_actual_future_steps_from_plan = len(target_future_plan_states_orig)
+        target_future_plan_states_orig = np.array(target_future_plan_states_orig_list, dtype=np.float32)
+
+        num_actual_future_steps_from_plan = (
+            target_future_plan_states_orig.shape[0] if target_future_plan_states_orig.ndim == 2 else 0
+        )
         len_to_copy_to_future = min(num_actual_future_steps_from_plan, self.prediction_length)
 
         if len_to_copy_to_future > 0:
@@ -189,9 +217,9 @@ class BlocksWorldDataset(Dataset):
             num_future_padding = self.prediction_length - len_to_copy_to_future
             padding_values = np.tile(goal_state_np_orig, (num_future_padding, 1))
             future_values_np[len_to_copy_to_future:] = padding_values
-            future_observed_mask_np[len_to_copy_to_future:, :] = 1.0
+            future_observed_mask_np[len_to_copy_to_future:, :] = 1.0  # Crucial: loss computed on goal padding
 
-        static_categorical_values_np = goal_state_np_orig.copy()  # 0/1
+        static_categorical_values_np = goal_state_np_orig.copy()
 
         # ** Now, scale the constructed numpy arrays to -1/1 **
         past_values_np_scaled = self._scale_binary_array(past_values_np)
@@ -204,9 +232,7 @@ class BlocksWorldDataset(Dataset):
             "future_values": torch.tensor(future_values_np_scaled, dtype=torch.float32).to(DEVICE),
             "past_observed_mask": torch.tensor(past_observed_mask_np, dtype=torch.float32).to(DEVICE),
             "future_observed_mask": torch.tensor(future_observed_mask_np, dtype=torch.float32).to(DEVICE),
-            "static_categorical_values": torch.tensor(static_categorical_values_np_scaled, dtype=torch.float32).to(
-                DEVICE
-            ),
+            "static_categorical_values": torch.tensor(static_categorical_values_np_scaled, dtype=torch.float32).to(DEVICE),
         }
 
 
@@ -349,9 +375,7 @@ class BlocksWorldTTM:
 
             inputs = {
                 "past_values": context_sequence_scaled,
-                "past_observed_mask": torch.ones_like(context_sequence_scaled).to(
-                    self.device
-                ),  # Mask is 1 for observed
+                "past_observed_mask": torch.ones_like(context_sequence_scaled).to(self.device),  # Mask is 1 for observed
                 "static_categorical_values": goal_states_scaled,
                 "freq_token": torch.zeros(batch_size, dtype=torch.long).to(self.device),
             }
@@ -456,30 +480,13 @@ def setup_logging(level="INFO", log_file: Optional[Path] = None):
     logger.info(f"Logging setup complete. Level: {level}. File: {log_file}")
 
 
-def analyze_dataset(data_path: Path) -> Dict[str, Any]:
-    logger.info(f"Analyzing dataset: {data_path}")
-    with open(data_path, "r") as f:
-        data = json.load(f)["plans"]
-
-    if not data:
-        logger.error(f"No plans found in dataset {data_path}.")
-        raise ValueError("Empty dataset.")
-
-    max_plan_length = max(len(item["plan"]) for item in data)
-    avg_plan_length = sum(len(item["plan"]) for item in data) / len(data)
-    state_dim = len(data[0]["initial_state"])
-    num_samples = len(data)
-
-    stats = {
-        "max_plan_length": max_plan_length,
-        "avg_plan_length": avg_plan_length,
-        "state_dim": state_dim,
-        "num_samples": num_samples,
-        "recommended_prediction_length": max_plan_length + 2,  # Small buffer
-    }
-
-    logger.info(f"Dataset Statistics:\n{pformat(stats)}")
-    return stats
+def load_problem_basenames_from_split_file(split_file_path: Path) -> List[str]:
+    if not split_file_path.exists():
+        logger.warning(f"Split file not found: {split_file_path}")
+        return []
+    with open(split_file_path, "r") as f:
+        basenames = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+    return basenames
 
 
 def determine_ttm_lengths(
@@ -520,39 +527,81 @@ def determine_ttm_lengths(
 
 
 def prepare_datasets(
-    data_path: Path, context_length: int, prediction_length: int, seed: int
-) -> Tuple[Dataset, Dataset, Dataset]:
+    dataset_dir: Path, dataset_split_dir: Path, num_blocks: int, context_length: int, prediction_length: int, seed: int
+) -> Tuple[Dataset, Dataset, Dataset, int, int]:
     logger.info("Preparing train/validation/test datasets...")
-    full_dataset = BlocksWorldDataset(str(data_path), context_length, prediction_length)
 
-    total_size = len(full_dataset)
-    train_size = int(0.7 * total_size)
-    val_size = int(0.15 * total_size)
-    test_size = total_size - train_size - val_size
-    logger.info(f"Splitting dataset: Total={total_size}, Train={train_size}, Val={val_size}, Test={test_size}")
+    train_basenames_all = load_problem_basenames_from_split_file(dataset_split_dir / "train_files.txt")
+    val_basenames_all = load_problem_basenames_from_split_file(dataset_split_dir / "val_files.txt")
+    # Test dataset is not strictly needed for training, but can be prepared for completeness
+    test_basenames_all = load_problem_basenames_from_split_file(dataset_split_dir / "test_files.txt")
 
-    if train_size + val_size + test_size != total_size:
+    # Filter basenames for the target num_blocks (important if split files are mixed)
+    # Assuming dataset_dir is already blocks_<N> specific, this might be redundant but safe.
+    train_basenames = [bn for bn in train_basenames_all if get_num_blocks_from_filename(bn) == num_blocks]
+    val_basenames = [bn for bn in val_basenames_all if get_num_blocks_from_filename(bn) == num_blocks]
+    test_basenames = [bn for bn in test_basenames_all if get_num_blocks_from_filename(bn) == num_blocks]
+
+    if not train_basenames:
         raise ValueError(
-            f"Dataset split sizes do not match total size. "
-            f"Train: {train_size}, Val: {val_size}, Test: {test_size}, Total: {total_size}"
-        )
-
-    else:
-        train_dataset, val_dataset, test_dataset = random_split(
-            full_dataset,
-            [train_size, val_size, test_size],
-            generator=torch.Generator().manual_seed(seed),
+            f"No training problem basenames found for N={num_blocks} in {dataset_split_dir / 'train_files.txt'}"
         )
 
     logger.info(
-        f"Dataset split complete. Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}"
+        f"Found {len(train_basenames)} train, {len(val_basenames)} val, {len(test_basenames)} test basenames for N={num_blocks}."
     )
-    return train_dataset, val_dataset, test_dataset
+
+    # Create dataset instances
+    # The state_dim will be determined by BlocksWorldDataset itself from the manifest
+    train_dataset_instance = BlocksWorldDataset(train_basenames, dataset_dir, context_length, prediction_length, num_blocks)
+
+    # state_dim is now an attribute of the dataset instance
+    state_dim = train_dataset_instance.state_dim
+
+    val_dataset_instance = BlocksWorldDataset(val_basenames, dataset_dir, context_length, prediction_length, num_blocks)
+    test_dataset_instance = BlocksWorldDataset(test_basenames, dataset_dir, context_length, prediction_length, num_blocks)
+
+    # Calculate max_plan_length from the actual training trajectories
+    max_plan_len_in_train_data = 0
+    if len(train_dataset_instance.trajectory_files) > 0:
+        for traj_file_path in train_dataset_instance.trajectory_files:
+            try:
+                traj_np = np.load(traj_file_path)
+                max_plan_len_in_train_data = max(max_plan_len_in_train_data, traj_np.shape[0])
+            except Exception as e:
+                logger.warning(f"Could not load trajectory {traj_file_path} to determine max length: {e}")
+    else:  # Should be caught by BlocksWorldDataset constructor if no files loaded
+        logger.warning("No trajectory files in training dataset to determine max_plan_length.")
+        # Default or raise error. If training data is empty, BlocksWorldDataset should have raised error.
+        # If it's not empty but all files failed to load for length check, this is an issue.
+        # For now, assume it's non-zero if we reach here.
+        if max_plan_len_in_train_data == 0 and len(train_dataset_instance) > 0:
+            max_plan_len_in_train_data = context_length + prediction_length  # A fallback
+            logger.warning(f"Max plan length in train data is 0, falling back to {max_plan_len_in_train_data}")
+
+    logger.info(
+        f"Dataset preparation complete. state_dim: {state_dim}, max_plan_len_in_train_data: {max_plan_len_in_train_data}"
+    )
+
+    return train_dataset_instance, val_dataset_instance, test_dataset_instance, state_dim, max_plan_len_in_train_data
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train a TTM model on the BlocksWorld domain.")
-    parser.add_argument("--dataset_file", type=Path, required=True, help="Path to the JSON dataset file.")
+    parser.add_argument(
+        "--dataset_dir",
+        type=Path,
+        required=True,
+        help="Path to the PaTS dataset directory for a specific N (e.g., data/blocks_4), containing trajectories_bin and predicate_manifest.",
+    )
+    parser.add_argument(
+        "--dataset_split_dir",
+        type=Path,
+        required=True,
+        help="Path to the directory containing train_files.txt, val_files.txt (e.g., data/blocks_4). Can be same as dataset_dir.",
+    )
+    parser.add_argument("--num_blocks", type=int, required=True, help="Number of blocks for this training run (e.g., 4).")
+
     parser.add_argument(
         "--output_dir",
         type=Path,
@@ -593,30 +642,66 @@ def main():
 
     args = parser.parse_args()
 
+    # Ensure output_dir uses num_blocks to avoid conflicts if running for multiple N
+    # Example: output_blocksworld_ttm/N4/
+    args.output_dir = args.output_dir / f"N{args.num_blocks}"
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    log_file = args.output_dir / "run_ttm.log"
+    log_file = args.output_dir / f"run_ttm_N{args.num_blocks}.log"
     setup_logging(args.log_level, log_file)
 
     logger.info(f"Script arguments: {pformat(vars(args))}")
-
-    # Set seed
     set_seed(args.seed)
     logger.info(f"Random seed set to: {args.seed}")
 
-    # Infer the number of blocks
-    num_blocks = int(str(args.dataset_file).split("_")[-1][0])
-    logger.info(f"Inferred number of blocks from dataset filename: {num_blocks}")
-
+    # num_blocks is now a direct argument
+    logger.info(f"Number of blocks for this run: {args.num_blocks}")
     logger.info("** Starting Training Mode **")
 
-    dataset_stats = analyze_dataset(args.dataset_file)
+    # Simplified flow:
+    # Get all train basenames first to calculate max_plan_length
+    _train_basenames_all = load_problem_basenames_from_split_file(args.dataset_split_dir / "train_files.txt")
+    _train_basenames_for_N = [bn for bn in _train_basenames_all if get_num_blocks_from_filename(bn) == args.num_blocks]
+
+    _max_plan_len_in_train_data = 0
+    if not _train_basenames_for_N:
+        logger.error(f"No training basenames found for N={args.num_blocks}. Cannot determine max plan length or train.")
+        return 1
+
+    for bn in _train_basenames_for_N:
+        traj_p = args.dataset_dir / "trajectories_bin" / f"{bn}.traj.bin.npy"
+        if traj_p.exists():
+            try:
+                traj_np = np.load(traj_p)
+                _max_plan_len_in_train_data = max(_max_plan_len_in_train_data, traj_np.shape[0])
+            except Exception as e:
+                logger.warning(f"Could not load {traj_p} for max length check: {e}")
+        else:
+            logger.warning(f"Trajectory file {traj_p} not found during max length check.")
+
+    if _max_plan_len_in_train_data == 0:
+        logger.error(f"Could not determine a valid max_plan_length from training data for N={args.num_blocks}.")
+        # Fallback or error. For now, let's use a default if user didn't specify context/pred lengths.
+        # This part is tricky. If user specifies context/pred, we use that.
+        # If not, we need max_plan_len.
+        if not args.context_length or not args.prediction_length:
+            logger.warning(
+                "Max plan length is 0, and context/prediction lengths not specified. Using defaults for TTM length determination."
+            )
+            _max_plan_len_in_train_data = 50  # Arbitrary default if all else fails
 
     auto_context_length, auto_prediction_length = determine_ttm_lengths(
-        dataset_stats["max_plan_length"],
-        dataset_stats["recommended_prediction_length"],
-        args.context_length,
-        args.prediction_length,
+        _max_plan_len_in_train_data,  # Use actual max plan length from training data
+        _max_plan_len_in_train_data + 2,  # Recommended prediction length
+        args.context_length,  # User override
+        args.prediction_length,  # User override
     )
+
+    # Now, properly prepare datasets with determined/validated context and prediction lengths
+    train_ds, val_ds, _, state_dim, _ = prepare_datasets(
+        args.dataset_dir, args.dataset_split_dir, args.num_blocks, auto_context_length, auto_prediction_length, args.seed
+    )
+    # state_dim comes from prepare_datasets (which gets it from BlocksWorldDataset)
+    # max_plan_len_in_train_data was already calculated above.
 
     model_cfg = ModelConfig(
         context_length=auto_context_length,
@@ -626,16 +711,13 @@ def main():
         num_epochs=args.num_epochs,
         ttm_model_path=args.ttm_model_path,
         seed=args.seed,
-        state_dim=dataset_stats["state_dim"],
+        state_dim=state_dim,  # Use state_dim from prepare_datasets
     )
     logger.info(f"Using ModelConfig: {pformat(asdict(model_cfg))}")
 
-    train_ds, val_ds, _ = prepare_datasets(
-        args.dataset_file, model_cfg.context_length, model_cfg.prediction_length, args.seed
-    )
-
-    if not train_ds:
-        logger.error("Training dataset is empty or None. Cannot train.")
+    # Check if train_ds is None or empty
+    if not train_ds or len(train_ds) == 0:  # type: ignore
+        logger.error("Training dataset is empty or None after preparation. Cannot train.")
         return 1
 
     ttm_model = BlocksWorldTTM(model_cfg, device=DEVICE, output_dir=args.output_dir)
@@ -643,7 +725,7 @@ def main():
 
     final_model_assets_path = args.output_dir / "final_model_assets"
     if final_model_assets_path.exists():
-        logger.error(
+        logger.warning(
             f"Model save path {final_model_assets_path} already exists."
             f"\nSuffixing `final_model_assets` with current timestamp (formatted nicely) to avoid overwriting."
         )
@@ -662,4 +744,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Wrap main call to exit with its return code
+    sys.exit(main())

@@ -78,7 +78,7 @@ def analyze_and_split_plans(
 
         plt.hist(
             df["length"],
-            bins=overall_bins,
+            bins=overall_bins,  # type: ignore
             edgecolor="black",
             alpha=0.7,
             color="skyblue",
@@ -95,7 +95,7 @@ def analyze_and_split_plans(
             ax_hist = plt.gca()
             if df["length"].nunique() > 1:  # KDE needs variation
                 ax_kde = ax_hist.twinx()
-                sns.kdeplot(df["length"], color="navy", linewidth=2, label="Overall KDE (density)", ax=ax_kde)
+                sns.kdeplot(df["length"], color="navy", linewidth=2, label="Overall KDE (density)", ax=ax_kde)  # type: ignore
                 ax_kde.set_ylabel("Density")
                 lines, labels = ax_hist.get_legend_handles_labels()
                 lines2, labels2 = ax_kde.get_legend_handles_labels()
@@ -234,8 +234,8 @@ def analyze_and_split_plans(
         plt.close()
         return
 
-    min_overall_len_splits = int(all_lengths_combined.min())
-    max_overall_len_splits = int(all_lengths_combined.max())
+    min_overall_len_splits = int(all_lengths_combined.min())  # type: ignore
+    max_overall_len_splits = int(all_lengths_combined.max())  # type: ignore
 
     bins = np.arange(min_overall_len_splits - 0.5, max_overall_len_splits + 1.5, 1)
     if len(bins) < 2:  # Handles cases like single unique value
@@ -250,7 +250,7 @@ def analyze_and_split_plans(
 
             plt.hist(
                 data_to_plot,
-                bins=bins,
+                bins=bins,  # type: ignore
                 alpha=config["alpha"],
                 label=f"{config['label']} (N={len(data_to_plot)})",
                 color=config["color"],

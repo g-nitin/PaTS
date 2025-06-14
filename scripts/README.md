@@ -15,7 +15,7 @@ The typical workflow for using PaTS is:
     - Run the training script. For example:
       ```bash
       # For TTM
-      uv run python scripts/models/ttm.py train --dataset_file data/blocks_4/YOUR_DATASET_FILE_FOR_TTM.json --output_dir output_ttm_N4 --num_epochs 100 --num_blocks 4
+      uv run python scripts/models/ttm.py --dataset_dir data/blocks_4 --dataset_split_dir data/blocks_4 --num_blocks--num_epochs 100
       # For LSTM
       uv run python scripts/models/lstm.py data/blocks_4 output_lstm_N4 --num_blocks 4 --epochs 100
       ```
@@ -52,7 +52,7 @@ The typical workflow for using PaTS is:
   - Passes the generated plan and goal state to an instance of `BlocksWorldValidator` (configured with the correct predicate manifest) for validation.
   - Collects detailed `ValidationResult` objects for each problem.
   - Computes and outputs aggregated performance metrics.
-- **`scripts/models/ttm.py`**: Implements training and prediction logic for the Tiny Time Mixer (TTM) model. It includes the `BlocksWorldDataset` for TTM-specific data loading and the `BlocksWorldTTM` class to manage the model. Its main focus is now on training and saving models.
+- **`scripts/models/ttm.py`**: Implements training and prediction logic for the Tiny Time Mixer (TTM) model. It includes the `BlocksWorldDataset` for TTM-specific data loading (using `.npy` files, split files like `train_files.txt`, and the `predicate_manifest_<N>.txt`) and the `BlocksWorldTTM` class to manage the model. Its main focus is now on training and saving models.
 - **`scripts/models/lstm.py`**: Implements training and prediction logic for a baseline LSTM model. Its main focus is now on training and saving models.
 - **`scripts/models/plansformer.py`**: (Placeholder) Intended for a Transformer-based planning model.
 

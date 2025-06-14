@@ -1,11 +1,11 @@
 import argparse
-import re  # For extracting num_blocks from filenames
 from pathlib import Path  # For more robust path handling
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from helpers import get_num_blocks_from_filename
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, pad_sequence
 from torch.utils.data import DataLoader, Dataset
 
@@ -114,15 +114,6 @@ class PaTS_LSTM(nn.Module):
         next_state_binary = (next_state_probs > 0.5).float()
 
         return next_state_binary, next_state_probs, h_next, c_next
-
-
-# ** Dataset and DataLoader **
-def get_num_blocks_from_filename(filename_base):
-    """Extracts number of blocks from a filename like 'blocks_3_problem_1'."""
-    match = re.search(r"blocks_(\d+)_problem", filename_base)
-    if match:
-        return int(match.group(1))
-    return None  # Or raise error
 
 
 class BWTrajectoryDataset(Dataset):
@@ -447,13 +438,9 @@ if __name__ == "__main__":
         print(f"No training data loaded for N={TARGET_NUM_BLOCKS}. Check dataset paths and split files. Exiting.")
         exit()
 
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=0
-    )
+    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=0)
     val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0)
-    test_dataloader = DataLoader(
-        test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0
-    )
+    test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0)
 
     # ** 2. Model Initialization **
     model = PaTS_LSTM(ACTUAL_NUM_FEATURES, HIDDEN_SIZE, NUM_LSTM_LAYERS, DROPOUT_PROB).to(DEVICE)

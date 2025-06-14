@@ -11,19 +11,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from BlocksWorldValidator import BlocksWorldValidator
 from loguru import logger
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
-from torch.utils.data import DataLoader, Dataset, Subset, random_split
+from torch.utils.data import Dataset, random_split
 from torch.utils.tensorboard.writer import SummaryWriter
 from transformers.modeling_utils import PreTrainedModel
 from transformers.trainer import Trainer
 from transformers.trainer_callback import EarlyStoppingCallback, TrainerCallback
 from transformers.trainer_utils import set_seed
 from transformers.training_args import TrainingArguments
-from tsfm_public import TrackingCallback
-from tsfm_public.toolkit.get_model import get_model
+from tsfm_public import TrackingCallback  # type: ignore
+from tsfm_public.toolkit.get_model import get_model  # type: ignore
 
 # ** Constants **
 DEFAULT_TTM_MODEL_PATH = "ibm-granite/granite-timeseries-ttm-r2"  # Default TTM model
@@ -243,7 +242,7 @@ class BlocksWorldTTM:
             "prediction_length": self.config.prediction_length,
             "head_dropout": 0.1,
         }
-        self.model: PreTrainedModel = get_model(**get_model_params).to(self.device)
+        self.model: PreTrainedModel = get_model(**get_model_params).to(self.device)  # type: ignore
 
         # Find model name key for logging
         get_model_params["return_model_key"] = True
@@ -315,7 +314,7 @@ class BlocksWorldTTM:
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
             callbacks=callbacks,
-            optimizers=(optimizer, scheduler),
+            optimizers=(optimizer, scheduler),  # type: ignore
         )
 
         logger.info("Trainer initialized. Starting training...")
@@ -417,7 +416,7 @@ class BlocksWorldTTM:
             "prediction_length": loaded_model_config.prediction_length,
             "head_dropout": 0.1,
         }
-        instance.model = get_model(**get_model_params).to(instance.device)
+        instance.model = get_model(**get_model_params).to(instance.device)  # type: ignore
 
         model_path = path / "model.pt"
         if not model_path.is_file():
@@ -551,679 +550,14 @@ def prepare_datasets(
     return train_dataset, val_dataset, test_dataset
 
 
-def evaluate_model(model: BlocksWorldTTM, test_dataset, num_blocks: int) -> Dict[str, Any]:
-    """Comprehensive evaluation of the model using BlocksWorldValidator."""
-    logger.info("Starting model evaluation on test set with BlocksWorldValidator...")
-    if model.model is None:
-        logger.error("Model not loaded or trained in BlocksWorldTTM instance.")
-        return {}
-    model.model.eval()
-
-    num_samples = len(test_dataset)
-    if num_samples == 0:
-        logger.warning("Test dataset is empty. Skipping evaluation.")
-        return {"num_samples": 0}
-
-    validator = BlocksWorldValidator(num_blocks=num_blocks)
-    all_predicted_sequences_01_list = []
-    all_target_sequences_01_list = []  # from sample["future_values"]
-    all_goal_states_01_list = []  # from sample["future_values"][-1] or sample["static_categorical_values"]
-
-    with torch.no_grad():
-        for i in range(num_samples):
-            sample = test_dataset[i]  # Data from BlocksWorldDataset is already -1/1
-
-            initial_state_m11 = sample["past_values"][0]  # (state_dim,)
-            goal_state_m11_from_static = sample["static_categorical_values"]  # (state_dim,)
-            target_sequence_m11 = sample["future_values"]  # (prediction_length, state_dim)
-
-            # Create context sequence
-            context_sequence_m11 = initial_state_m11.unsqueeze(0).repeat(1, model.config.context_length, 1)
-
-            inputs = {
-                "past_values": context_sequence_m11.to(model.device),
-                "past_observed_mask": torch.ones_like(context_sequence_m11).to(model.device),
-                "static_categorical_values": goal_state_m11_from_static.unsqueeze(0).to(model.device),
-                "freq_token": torch.zeros(1, dtype=torch.long).to(model.device),
-            }
-
-            outputs = model.model(**inputs)
-            raw_logits = outputs[0]  # (1, prediction_length, num_features)
-            predictions_tanh = torch.tanh(raw_logits)
-            prediction_scaled_binary_m11 = torch.where(
-                predictions_tanh > 0, torch.tensor(1.0, device=model.device), torch.tensor(-1.0, device=model.device)
-            )
-
-            # Convert predicted sequence from -1/1 tensor to list of lists of 0/1 ints
-            pred_seq_np_m11 = prediction_scaled_binary_m11.squeeze(0).cpu().numpy()
-            pred_seq_01 = [((step + 1.0) / 2.0).astype(int).tolist() for step in pred_seq_np_m11]
-            all_predicted_sequences_01_list.append(pred_seq_01)
-
-            # Convert target sequence from -1/1 tensor to list of lists of 0/1 ints
-            target_seq_np_m11 = target_sequence_m11.cpu().numpy()
-            target_seq_01 = [((step + 1.0) / 2.0).astype(int).tolist() for step in target_seq_np_m11]
-            all_target_sequences_01_list.append(target_seq_01)
-
-            # The actual goal state for validation should be the one used to generate the plan.
-            # This is represented by goal_state_m11_from_static or the last element of target_sequence_m11
-            # if future_observed_mask for that last step is 1 and it's indeed the goal.
-            # Using goal_state_m11_from_static is safer as it's explicitly the goal.
-            goal_np_m11 = goal_state_m11_from_static.cpu().numpy()
-            goal_01 = ((goal_np_m11 + 1.0) / 2.0).astype(int).tolist()
-            all_goal_states_01_list.append(goal_01)
-
-    metrics: Dict[str, Any]
-    if num_samples > 0:
-        logger.info(f"Using {num_blocks} blocks for validator.")
-        validator_metrics = validator.compute_performance_metrics(
-            predictions=all_predicted_sequences_01_list,
-            targets=all_target_sequences_01_list,  # Pass the ground truth sequences
-            goal_states=all_goal_states_01_list,
-        )
-        validator_metrics["num_samples"] = num_samples
-        metrics = validator_metrics
-    else:
-        metrics = {
-            "valid_sequence_rate": 0.0,
-            "goal_achievement_rate": 0.0,
-            "avg_sequence_length": 0.0,
-            "avg_changes_per_step": 0.0,
-            "exact_match_rate": 0.0,
-            "num_samples": 0,
-        }
-
-    logger.info("Detailed Model Evaluation Metrics (from BlocksWorldValidator):")
-    for key, value in metrics.items():
-        logger.info(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")
-    return metrics
-
-
-def analyze_error_patterns(model: BlocksWorldTTM, test_dataset: Dataset, num_blocks: int) -> Dict[str, Any]:
-    logger.info("Analyzing error patterns (data is -1/1)...")
-    if model.model is None:
-        logger.error("Model not loaded or trained in BlocksWorldTTM instance.")
-        return {}
-    model.model.eval()
-
-    validator = BlocksWorldValidator(num_blocks=num_blocks)
-    successes = []
-    failures = []
-    # Tracks which bit indices (0-based) are most commonly wrong
-    # The keys will be the feature indices.
-    bit_error_counts: Dict[int, int] = {}
-
-    num_samples = len(test_dataset)
-    if num_samples == 0:
-        logger.warning("Test dataset is empty. Skipping error analysis.")
-        return {
-            "num_successes": 0,
-            "num_failures": 0,
-            "success_rate": 0,
-            "bit_error_counts": {},
-            "success_cases": [],
-            "failure_cases": [],
-        }
-
-    with torch.no_grad():
-        for i in range(len(test_dataset)):
-            sample = test_dataset[i]  # Data from BlocksWorldDataset is already -1/1
-
-            initial_state_tensor = sample["past_values"][0].to(model.device)
-            goal_state_tensor = sample["static_categorical_values"].to(model.device)
-            target_final_state_tensor = sample["future_values"][-1].to(model.device)
-
-            context_sequence = initial_state_tensor.unsqueeze(0).repeat(1, model.config.context_length, 1)
-            inputs = {
-                "past_values": context_sequence,
-                "past_observed_mask": torch.ones_like(context_sequence).to(model.device),
-                "static_categorical_values": goal_state_tensor.unsqueeze(0),
-                "freq_token": torch.zeros(1, dtype=torch.long).to(model.device),
-            }
-
-            outputs = model.model(**inputs)
-            raw_logits = outputs[0]
-            predictions_tanh = torch.tanh(raw_logits)
-            predictions_scaled_binary_m11 = torch.where(
-                predictions_tanh > 0, torch.tensor(1.0, device=model.device), torch.tensor(-1.0, device=model.device)
-            )
-            predicted_final_state_tensor = predictions_scaled_binary_m11[0, -1, :]
-
-            # Validate the full predicted sequence
-            predicted_full_sequence_np_m11 = predictions_scaled_binary_m11.squeeze(0).cpu().numpy()
-            predicted_full_sequence_01 = [
-                ((step + 1.0) / 2.0).astype(int).tolist() for step in predicted_full_sequence_np_m11
-            ]
-
-            goal_state_np_m11 = goal_state_tensor.cpu().numpy()
-            goal_state_01 = ((goal_state_np_m11 + 1.0) / 2.0).astype(int).tolist()
-
-            validation_result = validator.validate_sequence(predicted_full_sequence_01, goal_state_01)
-
-            errors_mask = predicted_final_state_tensor != target_final_state_tensor
-            errors_indices_tensor = errors_mask.nonzero(as_tuple=False).squeeze(1)
-            num_errors_in_final_state = errors_indices_tensor.numel()
-
-            for error_idx_tensor in errors_indices_tensor:
-                bit_index = error_idx_tensor.item()
-                bit_error_counts[bit_index] = bit_error_counts.get(bit_index, 0) + 1
-
-            case = {
-                "initial_state": initial_state_tensor.cpu().numpy().tolist(),
-                "goal_state": goal_state_01,  # Store goal in 0/1 for consistency if desired, or keep -1/1
-                "predicted_final_state": predicted_final_state_tensor.cpu().numpy().tolist(),
-                "target_final_state": target_final_state_tensor.cpu().numpy().tolist(),
-                "num_errors_in_final_state": num_errors_in_final_state,
-                "error_positions_in_final_state": errors_indices_tensor.cpu().numpy().tolist(),
-                "is_predicted_sequence_valid": validation_result.is_valid,  # New
-                "predicted_sequence_violations": validation_result.violations,  # New
-            }
-
-            if (
-                num_errors_in_final_state == 0 and validation_result.is_valid
-            ):  # Success if final state matches AND sequence is valid
-                successes.append(case)
-            else:
-                failures.append(case)
-
-    total_cases = len(successes) + len(failures)
-    success_rate = (len(successes) / total_cases) if total_cases > 0 else 0.0
-
-    analysis = {
-        "num_successes": len(successes),
-        "num_failures": len(failures),
-        "success_rate_final_state_and_valid_sequence": success_rate,
-        "bit_error_counts_in_final_state": bit_error_counts,
-        "success_cases": successes,
-        "failure_cases": failures,
-    }
-
-    logger.info("Error Pattern Analysis (States are -1/1, goal in case is 0/1):")
-    logger.info(
-        f"  Number of successful predictions (exact final state match AND valid sequence): {analysis['num_successes']}"
-    )
-    logger.info(f"  Number of failed predictions: {analysis['num_failures']}")
-    logger.info(
-        f"  Success rate (exact final state AND valid sequence): {analysis['success_rate_final_state_and_valid_sequence']:.4f}"
-    )
-
-    if bit_error_counts:
-        logger.info("  Most common error positions in FINAL STATE (feature_index: count):")
-        sorted_errors = sorted(bit_error_counts.items(), key=lambda x: (-x[1], x[0]))
-        for feature_idx, count in sorted_errors[:10]:
-            logger.info(f"    Feature Index {feature_idx}: {count} errors")
-    else:
-        logger.info("  No bit errors recorded in final states across all failed predictions (or no failures).")
-
-    def format_state_for_log(state_list_minus_one_one):  # Expects -1/1
-        if not state_list_minus_one_one:
-            return "[]"
-        state_01 = [int((x + 1) / 2) for x in state_list_minus_one_one]
-        return str(state_01)
-
-    def format_goal_for_log(state_list_zero_one):  # Expects 0/1
-        if not state_list_zero_one:
-            return "[]"
-        return str(state_list_zero_one)
-
-    logger.info("\nExample Successes (up to 3, states shown as 0/1 for readability):")
-    for i, case_data in enumerate(analysis["success_cases"][:3]):
-        logger.info(f"Success Case {i + 1}:")
-        logger.info(f"  Initial State (0/1): {format_state_for_log(case_data['initial_state'])}")
-        logger.info(
-            f"  Goal State (0/1):    {format_goal_for_log(case_data['goal_state'])}"
-        )  # goal_state is already 0/1
-        logger.info(f"  Predicted Final (0/1): {format_state_for_log(case_data['predicted_final_state'])}")
-        logger.info(f"  Predicted Sequence Valid: {case_data['is_predicted_sequence_valid']}")
-
-    logger.info("\nExample Failures (up to 3, states shown as 0/1 for readability):")
-    for i, case_data in enumerate(analysis["failure_cases"][:3]):
-        logger.info(f"Failure Case {i + 1}:")
-        logger.info(f"  Initial State (0/1): {format_state_for_log(case_data['initial_state'])}")
-        logger.info(
-            f"  Goal State (0/1):    {format_goal_for_log(case_data['goal_state'])}"
-        )  # goal_state is already 0/1
-        logger.info(f"  Predicted Final (0/1): {format_state_for_log(case_data['predicted_final_state'])}")
-        logger.info(f"  Target Final (0/1):    {format_state_for_log(case_data['target_final_state'])}")
-        logger.info(f"  Num Errors (Final State): {case_data['num_errors_in_final_state']}")
-        logger.info(f"  Error Pos (Final State): {case_data['error_positions_in_final_state']}")
-        logger.info(f"  Predicted Sequence Valid: {case_data['is_predicted_sequence_valid']}")
-        if not case_data["is_predicted_sequence_valid"]:
-            logger.info(f"  Violations:\n{pformat(case_data['predicted_sequence_violations'])}")
-    return analysis
-
-
-def prepare_overfit_test_datasets(
-    data_path: Path, context_length: int, prediction_length: int, seed: int, num_overfit_samples: int = 4
-) -> Tuple[Dataset, Optional[Dataset]]:  # Val dataset can be None for this test
-    logger.info(f"Preparing dataset for overfitting test with {num_overfit_samples} samples...")
-    full_dataset = BlocksWorldDataset(str(data_path), context_length, prediction_length)
-
-    if len(full_dataset) < num_overfit_samples:
-        logger.warning(
-            f"Full dataset ({len(full_dataset)}) is smaller than requested num_overfit_samples ({num_overfit_samples}). "
-            f"Using all available samples."
-        )
-        num_overfit_samples = len(full_dataset)
-        if num_overfit_samples == 0:
-            logger.error("Dataset is empty. Cannot perform overfitting test.")
-            return None, None
-
-    # Create a subset of the full_dataset for overfitting
-    indices = list(range(num_overfit_samples))
-    overfit_train_dataset = Subset(full_dataset, indices)
-
-    logger.info(
-        f"Overfit training dataset created with {len(overfit_train_dataset)} samples."
-        f" State_dim: {getattr(full_dataset, 'state_dim')}"  # Access state_dim from the original full_dataset
-    )
-
-    # For overfitting, we often don't need a separate validation set, as we're just checking if it can memorize the training data.
-    overfit_val_dataset = None
-    # If the Trainer setup strictly requires it, use the same small set.
-    # overfit_val_dataset = Subset(full_dataset, indices)
-
-    return overfit_train_dataset, overfit_val_dataset
-
-
-def main_overfit():
-    parser = argparse.ArgumentParser(description="Train or evaluate a TTM model on the BlocksWorld domain.")
-    parser.add_argument("mode", choices=["train", "evaluate"], help="Script mode: train or evaluate.")
-    parser.add_argument("--dataset_file", type=Path, required=True, help="Path to the JSON dataset file.")
-    parser.add_argument(
-        "--output_dir",
-        type=Path,
-        default=Path("output_blocksworld_ttm"),
-        help="Directory to save models, logs, and results.",
-    )
-    parser.add_argument(
-        "--model_load_path",
-        type=Path,
-        help="Path to load a pre-trained model's assets directory (required for 'evaluate' mode).",
-    )
-
-    # Model and training parameters
-    parser.add_argument(
-        "--ttm_model_path",
-        type=str,
-        default=DEFAULT_TTM_MODEL_PATH,
-        help="Base TTM model path from HuggingFace or local. Default to 'ibm-granite/granite-timeseries-ttm-r2'.",
-    )
-    parser.add_argument(
-        "--context_length",
-        type=int,
-        help="Context length for TTM. If not provided, determined from dataset.",
-    )
-    parser.add_argument(
-        "--prediction_length",
-        type=int,
-        help="Prediction length for TTM. If not provided, determined from dataset.",
-    )
-    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate. Default is 1e-4.")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size. Default is 32.")
-    parser.add_argument("--num_epochs", type=int, default=50, help="Number of training epochs. Default is 50.")
-
-    # Other parameters
-    parser.add_argument("--seed", type=int, default=13, help="Random seed. Default is 13.")
-    parser.add_argument(
-        "--log_level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Logging level. Default is INFO.",
-    )
-
-    args = parser.parse_args()
-
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    log_file = args.output_dir / f"run_{args.mode}.log"
-    setup_logging(args.log_level, log_file)
-
-    logger.info(f"Script arguments: {pformat(vars(args))}")
-
-    # Set seed
-    set_seed(args.seed)
-    logger.info(f"Random seed set to: {args.seed}")
-
-    # Infer the number of blocks
-    num_blocks = int(str(args.dataset_file).split("_")[-1][0])
-    logger.info(f"Inferred number of blocks from dataset filename: {num_blocks}")
-
-    if args.mode == "train":
-        logger.info("** Starting Training Mode (Overfitting Test Variant) **")
-
-        dataset_stats = analyze_dataset(args.dataset_file)
-
-        auto_context_length, auto_prediction_length = determine_ttm_lengths(
-            dataset_stats["max_plan_length"],
-            dataset_stats["recommended_prediction_length"],
-            args.context_length,
-            args.prediction_length,
-        )
-
-        # ** Overfitting Test Specific Config **
-        NUM_OVERFIT_SAMPLES = 4  # Or make this an argparse argument
-        OVERFIT_EPOCHS = 200  # Train for longer to ensure memorization
-        OVERFIT_BATCH_SIZE = min(args.batch_size, NUM_OVERFIT_SAMPLES)  # Batch size can be small
-        OVERFIT_LR = args.learning_rate  # Start with the same LR, might need adjustment
-
-        logger.info("** OVERFITTING TEST PARAMETERS **")
-        logger.info(f"Number of samples to overfit: {NUM_OVERFIT_SAMPLES}")
-        logger.info(f"Epochs for overfitting: {OVERFIT_EPOCHS}")
-        logger.info(f"Batch size for overfitting: {OVERFIT_BATCH_SIZE}")
-        logger.info(f"Learning rate for overfitting: {OVERFIT_LR}")
-        logger.info("**********************")
-
-        model_cfg = ModelConfig(
-            context_length=auto_context_length,
-            prediction_length=auto_prediction_length,
-            learning_rate=OVERFIT_LR,  # Use overfit LR
-            batch_size=OVERFIT_BATCH_SIZE,  # Use overfit batch size
-            num_epochs=OVERFIT_EPOCHS,  # Use overfit epochs
-            ttm_model_path=args.ttm_model_path,
-            seed=args.seed,
-            state_dim=dataset_stats["state_dim"],
-        )
-        logger.info(f"Using ModelConfig for Overfitting: {pformat(asdict(model_cfg))}")
-
-        # Use the new dataset preparation function
-        train_ds, val_ds = prepare_overfit_test_datasets(
-            args.dataset_file,
-            model_cfg.context_length,
-            model_cfg.prediction_length,
-            args.seed,
-            num_overfit_samples=NUM_OVERFIT_SAMPLES,
-        )
-
-        if not train_ds:
-            logger.error("Training dataset for overfitting is empty or None. Cannot train.")
-            return 1
-
-        ttm_model = BlocksWorldTTM(model_cfg, device=DEVICE, output_dir=args.output_dir)
-
-        logger.info("Initializing TTM model for overfitting test...")
-        get_model_params = {
-            "model_path": model_cfg.ttm_model_path,
-            "context_length": model_cfg.context_length,
-            "prediction_length": model_cfg.prediction_length,
-            "head_dropout": 0.1,  # Keep consistent with your main training
-        }
-        overfit_model_instance: PreTrainedModel = get_model(**get_model_params).to(DEVICE)
-
-        overfit_training_args = TrainingArguments(
-            output_dir=posixpath.join(args.output_dir, "overfitting_training_output"),
-            learning_rate=model_cfg.learning_rate,
-            num_train_epochs=model_cfg.num_epochs,
-            per_device_train_batch_size=model_cfg.batch_size,
-            per_device_eval_batch_size=model_cfg.batch_size if val_ds else model_cfg.batch_size,
-            eval_strategy="no",  # Not strictly needed for overfitting test
-            save_strategy="no",
-            load_best_model_at_end=False,
-            seed=model_cfg.seed,
-            report_to="tensorboard",  # Enable TensorBoard reporting
-            logging_dir=str(args.output_dir / "tensorboard_logs_overfit"),  # Set logging directory
-            logging_strategy="steps",
-            logging_steps=1,  # Log loss every step for overfitting test
-            dataloader_pin_memory=False,
-            disable_tqdm=False,
-        )
-
-        logger.info(f"TensorBoard logs saved to: {args.output_dir / 'tensorboard_logs'}")
-        logger.info("To view TensorBoard, run: tensorboard --logdir=" + str(args.output_dir / "tensorboard_logs"))
-
-        optimizer = AdamW(overfit_model_instance.parameters(), lr=model_cfg.learning_rate)
-        num_train_samples = len(train_ds)
-        steps_per_epoch = math.ceil(num_train_samples / (model_cfg.batch_size * overfit_training_args.world_size))
-        scheduler = OneCycleLR(
-            optimizer,
-            max_lr=model_cfg.learning_rate,
-            epochs=model_cfg.num_epochs,
-            steps_per_epoch=steps_per_epoch,
-        )
-
-        overfit_trainer = Trainer(
-            model=overfit_model_instance,
-            args=overfit_training_args,
-            train_dataset=train_ds,
-            eval_dataset=val_ds,
-            callbacks=[TrackingCallback()],  # No EarlyStopping
-            optimizers=(optimizer, scheduler),
-        )
-
-        logger.info("Trainer for overfitting initialized. Starting training...")
-        overfit_trainer.train()
-        logger.info("Overfitting training finished.")
-
-        # *** After training, evaluate on the SAME small training set ***
-        logger.info("** Evaluating model on the SAME small training set used for overfitting **")
-
-        overfit_model_instance.eval()
-        perfect_predictions_count = 0  # Counts perfect match with target masked sequence
-        num_valid_overfit_plans = 0  # Counts valid plans by BlocksWorldValidator
-        total_loss_from_model_on_train = 0.0
-
-        # num_blocks is already inferred earlier in main_overfit
-        validator = BlocksWorldValidator(num_blocks=num_blocks)  # Initialize validator
-
-        overfit_dataloader = DataLoader(train_ds, batch_size=model_cfg.batch_size)
-        inspection_data = []
-
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(overfit_dataloader):
-                past_values = batch["past_values"].to(DEVICE)
-                future_values_target = batch["future_values"].to(DEVICE)
-                past_observed_mask = batch["past_observed_mask"].to(DEVICE)
-                future_observed_mask = batch["future_observed_mask"].to(DEVICE)
-                static_categorical_values = batch["static_categorical_values"].to(DEVICE)  # Goal state, -1/1
-                freq_token = batch["freq_token"].to(DEVICE)
-
-                outputs_with_loss = overfit_model_instance(
-                    past_values=past_values,
-                    past_observed_mask=past_observed_mask,
-                    static_categorical_values=static_categorical_values,
-                    future_values=future_values_target,
-                    future_observed_mask=future_observed_mask,
-                    freq_token=freq_token,
-                )
-                loss_from_model_per_batch = outputs_with_loss[0]
-                total_loss_from_model_on_train += loss_from_model_per_batch.item() * past_values.size(0)
-
-                outputs_for_prediction = overfit_model_instance(
-                    past_values=past_values,
-                    past_observed_mask=past_observed_mask,
-                    static_categorical_values=static_categorical_values,
-                    future_values=None,
-                    future_observed_mask=None,
-                    freq_token=freq_token,
-                )
-                predictions_raw_logits = outputs_for_prediction[0]  # (batch, pred_len, state_dim)
-                predictions_tanh = torch.tanh(predictions_raw_logits)
-                predictions_final_scaled_m11 = torch.where(  # (batch, pred_len, state_dim) -1/1
-                    predictions_tanh > 0, torch.tensor(1.0, device=DEVICE), torch.tensor(-1.0, device=DEVICE)
-                )
-
-                for i in range(past_values.shape[0]):  # Iterate through items in the current batch
-                    sample_idx_in_subset = batch_idx * model_cfg.batch_size + i
-
-                    active_mask_for_sample = future_observed_mask[i].bool()
-                    masked_target_m11 = future_values_target[i][active_mask_for_sample]
-                    masked_logits = predictions_raw_logits[i][active_mask_for_sample]
-                    masked_tanh_preds = predictions_tanh[i][active_mask_for_sample]
-                    masked_scaled_binary_preds_m11 = predictions_final_scaled_m11[i][active_mask_for_sample]
-
-                    mismatched_indices = (masked_scaled_binary_preds_m11 != masked_target_m11).nonzero(as_tuple=True)[0]
-                    is_perfect_masked_match = mismatched_indices.numel() == 0
-
-                    if is_perfect_masked_match:
-                        perfect_predictions_count += 1
-                        logger.debug(f"  Sample {sample_idx_in_subset}: Perfect match on masked parts with target.")
-                    else:
-                        logger.debug(f"  Sample {sample_idx_in_subset}: Mismatch found on masked parts with target.")
-                        # Add more detailed logging if needed, e.g., specific mismatched values
-
-                    # Validate the full predicted sequence for this item
-                    item_pred_seq_np_m11 = predictions_final_scaled_m11[i].cpu().numpy()
-                    item_pred_seq_01 = [((s + 1.0) / 2.0).astype(int).tolist() for s in item_pred_seq_np_m11]
-
-                    item_goal_np_m11 = static_categorical_values[i].cpu().numpy()  # Goal for this item
-                    item_goal_01 = ((item_goal_np_m11 + 1.0) / 2.0).astype(int).tolist()
-
-                    item_validation_result = validator.validate_sequence(item_pred_seq_01, item_goal_01)
-                    if item_validation_result.is_valid:
-                        num_valid_overfit_plans += 1
-
-                    inspection_data.append(
-                        {
-                            "sample_index_in_subset": sample_idx_in_subset,
-                            "batch_idx": batch_idx,
-                            "item_in_batch": i,
-                            "raw_logits_full": predictions_raw_logits[i].cpu().numpy().tolist(),
-                            "target_full": future_values_target[i].cpu().numpy().tolist(),
-                            "future_mask_full": future_observed_mask[i].cpu().numpy().tolist(),
-                            "masked_raw_logits": masked_logits.cpu().numpy().tolist(),
-                            "masked_target_values": masked_target_m11.cpu().numpy().tolist(),
-                            "masked_tanh_preds": masked_tanh_preds.cpu().numpy().tolist(),
-                            "masked_scaled_binary_preds": masked_scaled_binary_preds_m11.cpu().numpy().tolist(),
-                            "loss_for_this_batch_from_model": loss_from_model_per_batch.item(),
-                            "is_perfect_masked_match": is_perfect_masked_match,
-                            "is_pred_sequence_valid": item_validation_result.is_valid,
-                            "pred_sequence_violations": item_validation_result.violations,
-                        }
-                    )
-
-        avg_loss_from_model_on_train = total_loss_from_model_on_train / len(train_ds)
-        logger.info(f"*** Overfitting Test Results (on the {NUM_OVERFIT_SAMPLES} training samples) ***")
-        logger.info(f"Average Loss (from model's forward pass) on training data: {avg_loss_from_model_on_train:.6f}")
-        logger.info(
-            f"Number of perfectly predicted sequences (masked parts match target): {perfect_predictions_count}/{len(train_ds)}"
-        )
-        logger.info(
-            f"Number of validly generated plan sequences (by BlocksWorldValidator): {num_valid_overfit_plans}/{len(train_ds)}"
-        )
-
-        # Now print the inspection_data
-        logger.info("** Detailed Inspection of Predictions (first few samples) **")
-        for k, data_item in enumerate(inspection_data):
-            # Print details for first 2 samples if more than 2, else print all
-            if k >= 2 and len(inspection_data) > 2:
-                logger.info(f"... (omitting details for remaining {len(inspection_data) - k} samples) ...")
-                break
-            logger.info(
-                f"** Sample {data_item['sample_index_in_subset']} (Batch {data_item['batch_idx']}, Item {data_item['item_in_batch']}) **"
-            )
-            logger.info(f"  Loss for its batch (from model): {data_item['loss_for_this_batch_from_model']:.6f}")
-            logger.info(f"  Is Perfect Masked Match with Target: {data_item['is_perfect_masked_match']}")
-            logger.info(f"  Is Predicted Sequence Valid (Validator): {data_item['is_pred_sequence_valid']}")
-            if not data_item["is_pred_sequence_valid"]:  # Only print violations if not valid
-                logger.info(f"  Violations:\n{pformat(data_item['pred_sequence_violations'])}")
-
-            # To make printing manageable, let's look at a few time steps and a few features
-            # for the 'full' arrays. For 'masked' arrays, they might already be small.
-            num_timesteps_to_show = min(5, model_cfg.prediction_length)
-            num_features_to_show = min(5, model_cfg.state_dim)
-
-            logger.info(
-                f"  Target (future_values_target) - First {num_timesteps_to_show} steps, {num_features_to_show} features:"
-            )
-            for t in range(num_timesteps_to_show):
-                logger.info(f"    t={t}: {np.array(data_item['target_full'])[t, :num_features_to_show]}")
-
-            logger.info(
-                f"  Raw Logits (predictions_raw_logits) - First {num_timesteps_to_show} steps, {num_features_to_show} features:"
-            )
-            for t in range(num_timesteps_to_show):
-                logger.info(
-                    f"    t={t}: {np.array(data_item['raw_logits_full'])[t, :num_features_to_show].round(decimals=3)}"
-                )
-
-            logger.info(
-                f"  Future Observed Mask - First {num_timesteps_to_show} steps, {num_features_to_show} features:"
-            )
-            for t in range(num_timesteps_to_show):
-                logger.info(f"    t={t}: {np.array(data_item['future_mask_full'])[t, :num_features_to_show]}")
-
-            # For masked values, they are already flattened. Let's show some.
-            num_masked_elements_to_show = min(10, len(data_item["masked_target_values"]))
-            logger.info(
-                f"  Masked Target Values (first {num_masked_elements_to_show} active elements): {np.array(data_item['masked_target_values'])[:num_masked_elements_to_show]}"
-            )
-            logger.info(
-                f"  Masked Raw Logits (first {num_masked_elements_to_show} active elements): {np.array(data_item['masked_raw_logits'])[:num_masked_elements_to_show].round(decimals=3)}"
-            )
-            logger.info(
-                f"  Masked TanH Preds (first {num_masked_elements_to_show} active elements): {np.array(data_item['masked_tanh_preds'])[:num_masked_elements_to_show].round(decimals=3)}"
-            )
-            logger.info(
-                f"  Masked Scaled Binary Preds (first {num_masked_elements_to_show} active elements): {np.array(data_item['masked_scaled_binary_preds'])[:num_masked_elements_to_show]}"
-            )
-
-        if (
-            avg_loss_from_model_on_train < 1e-3
-            and perfect_predictions_count == len(train_ds)
-            and num_valid_overfit_plans == len(train_ds)
-        ):
-            logger.success(
-                "Overfitting test PASSED: Model successfully memorized the small batch and generated valid plans."
-            )
-        else:
-            logger.error(
-                "Overfitting test FAILED: Model did not fully memorize or generate valid plans for the small batch."
-            )
-
-    elif args.mode == "evaluate":
-        logger.info("** Starting Evaluation Mode **")
-        if not args.model_load_path:
-            logger.error("--model_load_path is required for 'evaluate' mode.")
-            return 1
-        if not args.model_load_path.exists() or not args.model_load_path.is_dir():
-            logger.error(f"Model assets path {args.model_load_path} does not exist or is not a directory.")
-            return 1
-
-        ttm_model = BlocksWorldTTM.load(args.model_load_path, device=DEVICE)
-
-        # state_dim from loaded model's config is used by BlocksWorldTTM.load
-        # context_length and prediction_length also from loaded config
-        _, _, test_ds = prepare_datasets(  # We only need test_ds here
-            args.dataset_file,
-            ttm_model.config.context_length,
-            ttm_model.config.prediction_length,
-            args.seed,
-        )
-
-        if not test_ds:
-            logger.error("Test dataset is empty or None. Cannot evaluate.")
-            return 1
-
-        eval_results_dir = args.output_dir / f"evaluation_results_{args.model_load_path.name}"
-        eval_results_dir.mkdir(parents=True, exist_ok=True)
-
-        metrics = evaluate_model(ttm_model, test_ds, num_blocks)
-        with open(eval_results_dir / "evaluation_metrics.json", "w") as f:
-            json.dump(metrics, f, indent=4)
-
-        error_analysis = analyze_error_patterns(ttm_model, test_ds, num_blocks)
-        with open(eval_results_dir / "evaluation_error_analysis.json", "w") as f:
-            json.dump(error_analysis, f, indent=4)
-
-        logger.info(f"Evaluation results saved to {eval_results_dir}")
-
-    logger.info("Script finished.")
-    return 0
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Train or evaluate a TTM model on the BlocksWorld domain.")
-    parser.add_argument("mode", choices=["train", "evaluate"], help="Script mode: train or evaluate.")
+    parser = argparse.ArgumentParser(description="Train a TTM model on the BlocksWorld domain.")
     parser.add_argument("--dataset_file", type=Path, required=True, help="Path to the JSON dataset file.")
     parser.add_argument(
         "--output_dir",
         type=Path,
         default=Path("output_blocksworld_ttm"),
         help="Directory to save models, logs, and results.",
-    )
-    parser.add_argument(
-        "--model_load_path",
-        type=Path,
-        help="Path to load a pre-trained model's assets directory (required for 'evaluate' mode).",
     )
 
     # Model and training parameters
@@ -1260,7 +594,7 @@ def main():
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    log_file = args.output_dir / f"run_{args.mode}.log"
+    log_file = args.output_dir / "run_ttm.log"
     setup_logging(args.log_level, log_file)
 
     logger.info(f"Script arguments: {pformat(vars(args))}")
@@ -1273,106 +607,57 @@ def main():
     num_blocks = int(str(args.dataset_file).split("_")[-1][0])
     logger.info(f"Inferred number of blocks from dataset filename: {num_blocks}")
 
-    if args.mode == "train":
-        logger.info("** Starting Training Mode **")
+    logger.info("** Starting Training Mode **")
 
-        dataset_stats = analyze_dataset(args.dataset_file)
+    dataset_stats = analyze_dataset(args.dataset_file)
 
-        auto_context_length, auto_prediction_length = determine_ttm_lengths(
-            dataset_stats["max_plan_length"],
-            dataset_stats["recommended_prediction_length"],
-            args.context_length,
-            args.prediction_length,
+    auto_context_length, auto_prediction_length = determine_ttm_lengths(
+        dataset_stats["max_plan_length"],
+        dataset_stats["recommended_prediction_length"],
+        args.context_length,
+        args.prediction_length,
+    )
+
+    model_cfg = ModelConfig(
+        context_length=auto_context_length,
+        prediction_length=auto_prediction_length,
+        learning_rate=args.learning_rate,
+        batch_size=args.batch_size,
+        num_epochs=args.num_epochs,
+        ttm_model_path=args.ttm_model_path,
+        seed=args.seed,
+        state_dim=dataset_stats["state_dim"],
+    )
+    logger.info(f"Using ModelConfig: {pformat(asdict(model_cfg))}")
+
+    train_ds, val_ds, _ = prepare_datasets(
+        args.dataset_file, model_cfg.context_length, model_cfg.prediction_length, args.seed
+    )
+
+    if not train_ds:
+        logger.error("Training dataset is empty or None. Cannot train.")
+        return 1
+
+    ttm_model = BlocksWorldTTM(model_cfg, device=DEVICE, output_dir=args.output_dir)
+    ttm_model.train(train_ds, val_ds)
+
+    final_model_assets_path = args.output_dir / "final_model_assets"
+    if final_model_assets_path.exists():
+        logger.error(
+            f"Model save path {final_model_assets_path} already exists."
+            f"\nSuffixing `final_model_assets` with current timestamp (formatted nicely) to avoid overwriting."
+        )
+        final_model_assets_path = final_model_assets_path.with_name(
+            f"final_model_assets_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         )
 
-        model_cfg = ModelConfig(
-            context_length=auto_context_length,
-            prediction_length=auto_prediction_length,
-            learning_rate=args.learning_rate,
-            batch_size=args.batch_size,
-            num_epochs=args.num_epochs,
-            ttm_model_path=args.ttm_model_path,
-            seed=args.seed,
-            state_dim=dataset_stats["state_dim"],
-        )
-        logger.info(f"Using ModelConfig: {pformat(asdict(model_cfg))}")
+    logger.info(f"Saving model assets to {final_model_assets_path}")
+    ttm_model.save(final_model_assets_path)
 
-        train_ds, val_ds, test_ds = prepare_datasets(
-            args.dataset_file, model_cfg.context_length, model_cfg.prediction_length, args.seed
-        )
+    logger.info(f"Training complete. Model saved to {final_model_assets_path}")
+    logger.info("To evaluate, use the benchmark.py script.")
 
-        if not train_ds:
-            logger.error("Training dataset is empty or None. Cannot train.")
-            return 1
-
-        ttm_model = BlocksWorldTTM(model_cfg, device=DEVICE, output_dir=args.output_dir)
-        ttm_model.train(train_ds, val_ds)
-
-        final_model_assets_path = args.output_dir / "final_model_assets"
-        if final_model_assets_path.exists():
-            logger.error(
-                f"Model save path {final_model_assets_path} already exists."
-                f"\nSuffixing `final_model_assets` with current timestamp (formatted nicely) to avoid overwriting."
-            )
-            final_model_assets_path = final_model_assets_path.with_name(
-                f"final_model_assets_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            )
-
-        logger.info(f"Saving model assets to {final_model_assets_path}")
-        ttm_model.save(final_model_assets_path)
-
-        if test_ds:
-            logger.info("** Evaluating model on test set after training **")
-            metrics = evaluate_model(ttm_model, test_ds, num_blocks)
-            with open(args.output_dir / "test_metrics_after_train.json", "w") as f:
-                json.dump(metrics, f, indent=4)
-
-            error_analysis = analyze_error_patterns(ttm_model, test_ds, num_blocks)
-            with open(args.output_dir / "test_error_analysis_after_train.json", "w") as f:
-                json.dump(error_analysis, f, indent=4)
-
-            logger.info(f"Post-training evaluation results saved to {args.output_dir}")
-        else:
-            logger.info("No test dataset available for evaluation after training.")
-
-    elif args.mode == "evaluate":
-        logger.info("** Starting Evaluation Mode **")
-        if not args.model_load_path:
-            logger.error("--model_load_path is required for 'evaluate' mode.")
-            return 1
-        if not args.model_load_path.exists() or not args.model_load_path.is_dir():
-            logger.error(f"Model assets path {args.model_load_path} does not exist or is not a directory.")
-            return 1
-
-        ttm_model = BlocksWorldTTM.load(args.model_load_path, device=DEVICE)
-
-        # state_dim from loaded model's config is used by BlocksWorldTTM.load
-        # context_length and prediction_length also from loaded config
-        _, _, test_ds = prepare_datasets(  # We only need test_ds here
-            args.dataset_file,
-            ttm_model.config.context_length,
-            ttm_model.config.prediction_length,
-            args.seed,
-        )
-
-        if not test_ds:
-            logger.error("Test dataset is empty or None. Cannot evaluate.")
-            return 1
-
-        eval_results_dir = args.output_dir / f"evaluation_results_{args.model_load_path.name}"
-        eval_results_dir.mkdir(parents=True, exist_ok=True)
-
-        metrics = evaluate_model(ttm_model, test_ds, num_blocks)
-        with open(eval_results_dir / "evaluation_metrics.json", "w") as f:
-            json.dump(metrics, f, indent=4)
-
-        error_analysis = analyze_error_patterns(ttm_model, test_ds, num_blocks)
-        with open(eval_results_dir / "evaluation_error_analysis.json", "w") as f:
-            json.dump(error_analysis, f, indent=4)
-
-        logger.info(f"Evaluation results saved to {eval_results_dir}")
-
-    logger.info("Script finished.")
+    logger.info("TTM script finished.")
     return 0
 
 

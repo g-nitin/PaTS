@@ -1,353 +1,390 @@
+import re
 from dataclasses import dataclass
-from typing import Dict, List, Set, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 
 @dataclass
+class Violation:
+    code: str  # e.g., "PHYS_BLOCK_FLOATING", "TRANS_ILLEGAL_CHANGES"
+    message: str
+    details: Optional[Dict[str, Any]] = None  # e.g., {"block": "A"}
+
+
+@dataclass
 class ValidationResult:
     is_valid: bool
-    violations: List[str]
+    violations: List[Violation]  # Changed from List[str]
     metrics: Dict[str, float]
+    # New metrics
+    goal_jaccard_score: float = 0.0
+    goal_f1_score: float = 0.0
+    # Add a field to store the predicted plan itself for easier aggregation later
+    predicted_plan_length: int = 0
 
 
 class BlocksWorldValidator:
-    def __init__(self, num_blocks: int):
-        """Initialize validator for a specific number of blocks"""
+    def __init__(self, num_blocks: int, predicate_manifest_file: str | Path):
+        """Initialize validator for a specific number of blocks using a predicate manifest."""
         self.num_blocks = num_blocks
+        self.predicate_manifest_file = Path(predicate_manifest_file)
+
+        # These will be populated by _setup_feature_indices
+        self.predicate_list: List[str] = []
+        self.state_size: int = 0
+        self.block_names: List[str] = []  # e.g., ["b1", "b2", "b3"]
+
+        self.on_table_indices: Dict[str, int] = {}
+        self.on_block_indices: Dict[Tuple[str, str], int] = {}
+        self.clear_indices: Dict[str, int] = {}
+        self.held_indices: Dict[str, int] = {}
+        self.arm_empty_index: Optional[int] = None
+
         self._setup_feature_indices()
 
     def _setup_feature_indices(self):
-        """Calculate indices for different features in the state vector"""
-        blocks = [chr(ord("A") + i) for i in range(self.num_blocks)]
+        """Calculate indices for different features in the state vector by reading the manifest."""
+        if not self.predicate_manifest_file.is_file():
+            raise FileNotFoundError(f"Predicate manifest file not found: {self.predicate_manifest_file}")
 
-        # Create maps for easy index lookup
-        self.on_table_indices = {}
-        self.on_block_indices = {}
-        self.clear_indices = {}
-        # self.held_indices = {}
-        # self.arm_empty_index will be a single integer
+        with open(self.predicate_manifest_file, "r") as f:
+            self.predicate_list = [line.strip() for line in f if line.strip()]
 
-        idx = 0
-        # On table indices
-        for block in blocks:
-            self.on_table_indices[block] = idx
-            idx += 1
+        self.state_size = len(self.predicate_list)
+        if self.state_size == 0:
+            raise ValueError(f"Predicate manifest file {self.predicate_manifest_file} is empty or invalid.")
 
-        # Block on block indices
-        for block1 in blocks:
-            for block2 in blocks:
-                if block1 != block2:
-                    self.on_block_indices[(block1, block2)] = idx
-                    idx += 1
+        # Determine block names based on num_blocks, assuming "bX" convention from parse_and_encode.py
+        self.block_names = [f"b{i + 1}" for i in range(self.num_blocks)]
 
-        # Clear indices
-        for block in blocks:
-            self.clear_indices[block] = idx
-            idx += 1
+        for idx, pred_string_from_manifest in enumerate(self.predicate_list):
+            pred_string = pred_string_from_manifest.lower()  # Already normalized by parser
 
-        # Arm empty index
-        self.arm_empty_index = idx
-        idx += 1
+            # On table: (on-table bX)
+            m_on_table = re.fullmatch(r"\(on-table (b\d+)\)", pred_string)
+            if m_on_table:
+                block_name = m_on_table.group(1)
+                if block_name in self.block_names:
+                    self.on_table_indices[block_name] = idx
+                continue
 
-        # Held indices
-        self.held_indices = {}  # Initialize
-        for block in blocks:
-            self.held_indices[block] = idx
-            idx += 1
+            # On block: (on bX bY)
+            m_on_block = re.fullmatch(r"\(on (b\d+) (b\d+)\)", pred_string)
+            if m_on_block:
+                b1 = m_on_block.group(1)
+                b2 = m_on_block.group(2)
+                if b1 in self.block_names and b2 in self.block_names and b1 != b2:
+                    self.on_block_indices[(b1, b2)] = idx
+                continue
 
-        self.state_size = idx
+            # Clear: (clear bX)
+            m_clear = re.fullmatch(r"\(clear (b\d+)\)", pred_string)
+            if m_clear:
+                block_name = m_clear.group(1)
+                if block_name in self.block_names:
+                    self.clear_indices[block_name] = idx
+                continue
 
-    def _check_physical_constraints(self, state: List[int]) -> Tuple[bool, List[str]]:
+            # Arm empty: (arm-empty)
+            if pred_string == "(arm-empty)":
+                self.arm_empty_index = idx
+                continue
+
+            # Holding: (holding bX)
+            m_holding = re.fullmatch(r"\(holding (b\d+)\)", pred_string)
+            if m_holding:
+                block_name = m_holding.group(1)
+                if block_name in self.block_names:
+                    self.held_indices[block_name] = idx
+                continue
+
+        # Sanity check: ensure arm_empty_index was found
+        if self.arm_empty_index is None:
+            raise ValueError("(arm-empty) predicate not found in manifest. This is required.")
+
+        # TODO: Further sanity checks can be added (e.g., all expected index dicts are populated for all blocks)
+
+    def _check_physical_constraints(self, state: List[int] | np.ndarray) -> Tuple[bool, List[Violation]]:
         """Check if state satisfies basic physical constraints"""
-        violations = []
+        violations: List[Violation] = []
+        state_arr = np.array(state) if not isinstance(state, np.ndarray) else state
 
-        # Check state vector size
-        if len(state) != self.state_size:
-            violations.append(f"Invalid state size: expected {self.state_size}, got {len(state)}")
+        if len(state_arr) != self.state_size:
+            violations.append(
+                Violation("STATE_INVALID_SIZE", f"Invalid state size: expected {self.state_size}, got {len(state_arr)}")
+            )
             return False, violations
 
-        blocks = [chr(ord("A") + i) for i in range(self.num_blocks)]
-
         # Check each block
-        for block in blocks:
-            # Count number of positions (should be on exactly one surface or held)
+        for block in self.block_names:
             positions = 0
-            if state[self.on_table_indices[block]] == 1:
+            # On table
+            if block in self.on_table_indices and state_arr[self.on_table_indices[block]] == 1:
                 positions += 1
-            for other in blocks:
-                if other != block and (block, other) in self.on_block_indices:
-                    if state[self.on_block_indices[(block, other)]] == 1:
+            # On another block
+            for other_block in self.block_names:
+                if other_block != block and (block, other_block) in self.on_block_indices:
+                    if state_arr[self.on_block_indices[(block, other_block)]] == 1:
                         positions += 1
-            if state[self.held_indices[block]] == 1:
+            # Held
+            if block in self.held_indices and state_arr[self.held_indices[block]] == 1:
                 positions += 1
 
             if positions == 0:
-                violations.append(f"Block {block} is floating (not on any surface or held)")
+                violations.append(
+                    Violation(
+                        "PHYS_BLOCK_FLOATING",
+                        f"Block {block} is floating (not on any surface or held)",
+                        {"block": block},
+                    )
+                )
             elif positions > 1:
-                violations.append(f"Block {block} is in multiple positions simultaneously")
-
-            # Check for cycles in stacking
-            if self._has_cycle(state, block, set()):
-                violations.append(f"Found cycle in block stacking involving block {block}")
+                violations.append(
+                    Violation(
+                        "PHYS_BLOCK_MULTI_POS",
+                        f"Block {block} is in multiple positions simultaneously",
+                        {"block": block},
+                    )
+                )
 
             # Check clear status consistency
-            if state[self.clear_indices[block]] == 1:
-                for other in blocks:
-                    if other != block and (other, block) in self.on_block_indices:
-                        if state[self.on_block_indices[(other, block)]] == 1:
-                            violations.append(f"Block {block} marked as clear but has {other} on top")
+            if block in self.clear_indices and state_arr[self.clear_indices[block]] == 1:
+                for other_on_top in self.block_names:  # Check if any other_on_top is on 'block'
+                    if other_on_top != block and (other_on_top, block) in self.on_block_indices:
+                        if state_arr[self.on_block_indices[(other_on_top, block)]] == 1:
+                            violations.append(
+                                Violation(
+                                    "PHYS_CLEAR_CONFLICT",
+                                    f"Block {block} marked as clear but has {other_on_top} on top",
+                                    {"block": block, "block_on_top": other_on_top},
+                                )
+                            )
 
-            # Check arm-empty and holding consistency
-            num_held_blocks = 0
-            for block_char_code in range(ord("A"), ord("A") + self.num_blocks):
-                block = chr(block_char_code)
-                if state[self.held_indices[block]] == 1:
-                    num_held_blocks += 1
+        # Check arm-empty and holding consistency
+        num_held_blocks = 0
+        held_block_names = []
+        for block_h in self.block_names:
+            if block_h in self.held_indices and state_arr[self.held_indices[block_h]] == 1:
+                num_held_blocks += 1
+                held_block_names.append(block_h)
 
-            is_arm_empty_predicate_true = state[self.arm_empty_index] == 1
+        if self.arm_empty_index is None:  # Should have been caught by _setup_feature_indices
+            violations.append(Violation("INTERNAL_ERROR", "arm_empty_index not configured"))
+            return False, violations  # Cannot proceed with this check
 
-            if num_held_blocks > 1:
-                violations.append("Arm is holding multiple blocks.")
+        is_arm_empty_predicate_true = state_arr[self.arm_empty_index] == 1
 
-            if is_arm_empty_predicate_true:
-                if num_held_blocks > 0:
-                    violations.append("Arm-empty predicate is true, but arm is holding block(s).")
-            else:  # Arm-empty predicate is false (i.e., arm should be holding something)
-                if num_held_blocks == 0:
-                    violations.append("Arm-empty predicate is false, but arm is not holding any block.")
-                # If num_held_blocks > 1, it's already caught above.
-                # If num_held_blocks == 1, this is consistent.
+        if num_held_blocks > 1:
+            violations.append(
+                Violation(
+                    "PHYS_ARM_MULTI_HOLD",
+                    f"Arm is holding multiple blocks: {', '.join(held_block_names)}",
+                    {"held_blocks": held_block_names},
+                )
+            )
+
+        if is_arm_empty_predicate_true:
+            if num_held_blocks > 0:
+                violations.append(
+                    Violation(
+                        "PHYS_ARM_EMPTY_HOLDING_CONFLICT",
+                        f"Arm-empty predicate is true, but arm is holding block(s): {', '.join(held_block_names)}",
+                        {"held_blocks": held_block_names},
+                    )
+                )
+        else:  # Arm-empty predicate is false (i.e., arm should be holding something)
+            if num_held_blocks == 0:
+                violations.append(
+                    Violation(
+                        "PHYS_ARM_NOT_EMPTY_NOT_HOLDING_CONFLICT",
+                        "Arm-empty predicate is false, but arm is not holding any block.",
+                    )
+                )
 
         return len(violations) == 0, violations
 
-    def _has_cycle(self, state: List[int], start_block: str, visited: Set[str]) -> bool:
-        """Check for cycles in block stacking"""
-        if start_block in visited:
-            return True
-
-        visited.add(start_block)
-        blocks = [chr(ord("A") + i) for i in range(self.num_blocks)]
-
-        for block in blocks:
-            if block != start_block and (start_block, block) in self.on_block_indices:
-                if state[self.on_block_indices[(start_block, block)]] == 1:
-                    if self._has_cycle(state, block, visited):
-                        return True
-
-        visited.remove(start_block)
-        return False
-
-    def _check_legal_transition(self, state1: List[int], state2: List[int]) -> Tuple[bool, List[str]]:
+    def _check_legal_transition(self, state1: np.ndarray, state2: np.ndarray) -> Tuple[bool, List[Violation]]:
         """Check if transition between states is legal according to blocks world rules.
         Assumes state1 and state2 are individually physically valid."""
-        violations = []
-        differences = sum(1 for a, b in zip(state1, state2) if a != b)
+        violations: List[Violation] = []
+        # Ensure states are numpy arrays for efficient comparison
+        s1 = np.array(state1) if not isinstance(state1, np.ndarray) else state1
+        s2 = np.array(state2) if not isinstance(state2, np.ndarray) else state2
+
+        differences = np.sum(s1 != s2)
 
         if differences == 0:
-            violations.append("No change between states")
+            # This is not necessarily an error if the state is the goal state.
+            # The validate_sequence method will handle this context.
+            violations.append(Violation("TRANS_NO_CHANGE", "No change between states", {"diff_count": 0}))
         # A single action (pickup, putdown) changes 4 features.
         # A single action (stack, unstack) changes 5 features.
         elif differences < 4 or differences > 5:
             violations.append(
-                f"Illegal number of changes ({differences} bits changed). Expected 4 or 5 for a single action, or 0 if at goal."
+                Violation(
+                    "TRANS_ILLEGAL_CHANGES",
+                    f"Illegal number of changes ({differences} bits changed). Expected 4 or 5 for a single action.",
+                    {"diff_count": differences},
+                )
             )
 
         return len(violations) == 0, violations
 
-    def validate_sequence(self, states: List[List[int]], goal_state: List[int]) -> ValidationResult:
+    def validate_sequence(
+        self, states: List[List[int] | np.ndarray], goal_state: List[int] | np.ndarray
+    ) -> ValidationResult:
         """Validate a complete sequence of states leading to a goal"""
-        all_violations = []
-        metrics = {}
+        all_violations_obj: List[Violation] = []
+        metrics: Dict[str, float] = {}
 
-        if not states:
-            all_violations.append("Predicted sequence is empty.")
-            # Assuming empty sequence doesn't achieve a typical BlocksWorld goal.
-            # If goal_state could represent an "empty" or initial state, this might need adjustment.
-            # For now, if sequence is empty, goal is not achieved unless goal_state is also somehow "empty".
-            # is_empty_goal = not np.any(goal_state)  # Simplistic check if goal is all zeros (e.g. -1 after scaling)
-            # Or, more robustly, define what an "empty" goal means.
-            # For this problem, goal_state is unlikely to be "empty" in a way that matches an empty plan.
+        # Convert all states to numpy arrays for consistency
+        np_states = [np.array(s) for s in states]
+        np_goal_state = np.array(goal_state)
 
+        if not np_states:
+            all_violations_obj.append(Violation("SEQ_EMPTY", "Predicted sequence is empty."))
             metrics["sequence_length"] = 0
-            metrics["goal_achievement"] = 0.0  # Default for empty sequence
+            metrics["goal_achievement"] = 0.0
             metrics["avg_changes_per_step"] = 0.0
-            return ValidationResult(is_valid=len(all_violations) == 0, violations=all_violations, metrics=metrics)
+            return ValidationResult(
+                is_valid=False,
+                violations=all_violations_obj,
+                metrics=metrics,
+                goal_jaccard_score=0.0,
+                goal_f1_score=0.0,
+                predicted_plan_length=0,
+            )
 
         # 1. Validate all states individually for physical constraints
-        for i, state_vector in enumerate(states):
+        physically_valid_states_count = 0
+        for i, state_vector in enumerate(np_states):
             is_physically_valid, physical_violations = self._check_physical_constraints(state_vector)
             if not is_physically_valid:
-                all_violations.extend([f"State {i} physically invalid: {v}" for v in physical_violations])
+                for v in physical_violations:
+                    all_violations_obj.append(Violation(v.code, f"State {i} invalid: {v.message}", v.details))
+            else:
+                physically_valid_states_count += 1
 
-        # If any state is physically invalid, the sequence is fundamentally flawed.
-        if all_violations:
-            metrics["sequence_length"] = len(states)
-            metrics["goal_achievement"] = 0.0
-            metrics["avg_changes_per_step"] = 0.0  # Not meaningful if states are invalid
-            return ValidationResult(is_valid=False, violations=all_violations, metrics=metrics)
-
-        # 2. All states are physically valid. Now check transitions.
-        for i in range(1, len(states)):
-            # Note: _check_legal_transition now assumes states are physically valid.
-            valid_transition, transition_violations_list = self._check_legal_transition(states[i - 1], states[i])
-
-            if not valid_transition:
-                is_acceptable_no_change = False
-                # Check if the only violation is "No change between states" AND the state is the goal state
-                if "No change between states" in transition_violations_list:
-                    if np.array_equal(states[i - 1], goal_state):  # If the state that didn't change is the goal
-                        # And "No change" is the *only* violation from _check_legal_transition
-                        if (
-                            len(transition_violations_list) == 1
-                            and transition_violations_list[0] == "No change between states"
-                        ):
-                            is_acceptable_no_change = True
-
-                if not is_acceptable_no_change:
-                    all_violations.extend([f"Transition {i - 1}->{i}: {v}" for v in transition_violations_list])
-
-        # 3. Check if the final state of the sequence matches the goal state
-        final_state_is_goal = np.array_equal(states[-1], goal_state)
-        if not final_state_is_goal:
-            # Avoid overly verbose goal state printing if it's long
-            # final_state_str = str(states[-1][:10]) + "..." if len(states[-1]) > 10 else str(states[-1])
-            # goal_state_str = str(goal_state[:10]) + "..." if len(goal_state) > 10 else str(goal_state)
-            all_violations.append("Final state does not match goal state.")
-
-        # Populate metrics
-        metrics["sequence_length"] = len(states)
-        metrics["goal_achievement"] = float(final_state_is_goal)
-
-        if len(states) > 1:
-            sum_changes_for_avg = 0
-            for i_tc in range(len(states) - 1):
-                diff_count = sum(1 for a, b in zip(states[i_tc], states[i_tc + 1]) if a != b)
-                sum_changes_for_avg += diff_count
-            metrics["avg_changes_per_step"] = sum_changes_for_avg / (len(states) - 1)
-        else:  # single state sequence
-            metrics["avg_changes_per_step"] = 0.0
-
-        return ValidationResult(
-            is_valid=len(all_violations) == 0,
-            violations=all_violations,
-            metrics=metrics,
+        metrics["percent_physically_valid_states"] = (
+            (physically_valid_states_count / len(np_states)) * 100 if np_states else 0.0
         )
 
-    def compute_performance_metrics(
-        self,
-        predictions: List[List[List[int]]],
-        targets: List[List[List[int]]],
-        goal_states: List[List[int]],
-    ) -> Dict[str, float]:
-        """Compute comprehensive performance metrics for a batch of predictions"""
-        metrics = {
-            "valid_sequence_rate": 0.0,
-            "goal_achievement_rate": 0.0,
-            "avg_sequence_length": 0.0,
-            "avg_changes_per_step": 0.0,
-            "exact_match_rate": 0.0,
-        }
+        # If any state is physically invalid, the sequence is fundamentally flawed for some metrics,
+        # but we can still report others.
+        # Let's continue to check transitions if desired, or bail early.
+        # For now, let's assume we continue to gather all possible violations.
 
-        num_samples = len(predictions)
-        valid_sequences = 0
-        goal_achieved = 0
-        total_length = 0
-        total_changes = 0
-        exact_matches = 0
+        # 2. Check transitions.
+        valid_transitions_count = 0
+        if len(np_states) > 1:
+            for i in range(len(np_states) - 1):
+                # Pass np_states[i] and np_states[i+1]
+                valid_transition, transition_violations_list = self._check_legal_transition(
+                    np_states[i], np_states[i + 1]
+                )
 
-        for pred, target, goal in zip(predictions, targets, goal_states):
-            # Validate prediction sequence
-            result = self.validate_sequence(pred, goal)
+                is_acceptable_no_change = False
+                if not valid_transition:
+                    # Check if the only violation is "No change between states" AND the state is the goal state
+                    if any(v.code == "TRANS_NO_CHANGE" for v in transition_violations_list):
+                        if np.array_equal(np_states[i], np_goal_state):
+                            if (
+                                len(transition_violations_list) == 1
+                                and transition_violations_list[0].code == "TRANS_NO_CHANGE"
+                            ):
+                                is_acceptable_no_change = True
+                                # This "no change at goal" is fine, counts as a valid step in a sense
+                                valid_transitions_count += 1
 
-            if result.is_valid:
-                valid_sequences += 1
-            if result.metrics["goal_achievement"] == 1.0:
-                goal_achieved += 1
-            total_length += result.metrics["sequence_length"]
-            if "avg_changes_per_step" in result.metrics:
-                total_changes += result.metrics["avg_changes_per_step"]
+                    if not is_acceptable_no_change:
+                        for v_trans in transition_violations_list:
+                            all_violations_obj.append(
+                                Violation(v_trans.code, f"Transition {i}->{i + 1}: {v_trans.message}", v_trans.details)
+                            )
+                else:
+                    valid_transitions_count += 1
+            metrics["percent_valid_transitions"] = (valid_transitions_count / (len(np_states) - 1)) * 100
+        else:  # single state sequence
+            metrics["percent_valid_transitions"] = 100.0  # Or 0.0, or N/A. If S0 is goal, it's valid.
 
-            # Check for exact match with target sequence
-            if len(pred) == len(target) and all(np.array_equal(p, t) for p, t in zip(pred, target)):
-                exact_matches += 1
+        # 3. Check if the final state of the sequence matches the goal state
+        final_state_is_goal = np.array_equal(np_states[-1], np_goal_state)
+        if not final_state_is_goal:
+            all_violations_obj.append(Violation("SEQ_GOAL_MISMATCH", "Final state does not match goal state."))
 
-        # Calculate final metrics
-        metrics["valid_sequence_rate"] = valid_sequences / num_samples
-        metrics["goal_achievement_rate"] = goal_achieved / num_samples
-        metrics["avg_sequence_length"] = total_length / num_samples
-        metrics["avg_changes_per_step"] = total_changes / num_samples
-        metrics["exact_match_rate"] = exact_matches / num_samples
+        metrics["goal_achievement"] = float(final_state_is_goal)
 
-        return metrics
+        # Calculate Jaccard and F1 for goal match
+        final_pred_state = np_states[-1]
+        pred_true_indices = set(np.where(final_pred_state == 1)[0])
+        goal_true_indices = set(np.where(np_goal_state == 1)[0])
 
+        intersection_len = len(pred_true_indices.intersection(goal_true_indices))
+        union_len = len(pred_true_indices.union(goal_true_indices))
 
-# Example usage
-if __name__ == "__main__":
-    # Example with 2 blocks
-    validator = BlocksWorldValidator(num_blocks=2)  # state_size should be 9
-    print(f"Validator for 2 blocks expects state size: {validator.state_size}")
+        jaccard = (
+            intersection_len / union_len
+            if union_len > 0
+            else (1.0 if not pred_true_indices and not goal_true_indices else 0.0)
+        )
 
-    # fmt: off
+        precision = (
+            intersection_len / len(pred_true_indices)
+            if len(pred_true_indices) > 0
+            else (1.0 if intersection_len == 0 and len(goal_true_indices) == 0 else 0.0)
+        )
+        recall = (
+            intersection_len / len(goal_true_indices)
+            if len(goal_true_indices) > 0
+            else (1.0 if intersection_len == 0 and len(pred_true_indices) == 0 else 0.0)
+        )
 
-    # Valid state: A on table, B on A, A not clear, B clear, arm empty
-    # Indices for 2 blocks (A, B) with arm-empty:
-    # on_table_indices: A=0, B=1
-    # on_block_indices: (A,B)=2, (B,A)=3
-    # clear_indices: A=4, B=5
-    # arm_empty_index: 6
-    # held_indices: A=7, B=8
-    valid_state = [
-        1, 0,  # A on table, B not
-        0, 1,  # A not on B, B on A
-        0, 1,  # A not clear, B clear
-        1,      # Arm empty
-        0, 0,  # A not held, B not held
-    ]
-    # Corrected: A on table (1), B not on table (0). B on A (1). A not clear (0), B clear (1). Arm empty (1). Nothing held (0,0).
-    # valid_state = [1,0, 0,1, 0,1, 1, 0,0] # This matches the derivation
+        f1 = (
+            2 * (precision * recall) / (precision + recall)
+            if (precision + recall) > 0
+            else (1.0 if precision == 1.0 and recall == 1.0 else 0.0)
+        )
 
-    # Invalid state: A floating, arm empty (but A is not on anything or held)
-    invalid_state_floating_A = [
-        0, 0,  # A not on table, B not on table
-        0, 0,  # A not on B, B not on A
-        1, 1,  # A clear, B clear
-        1,      # Arm empty
-        0, 0,  # A not held, B not held
-    ]
+        # Populate metrics
+        metrics["sequence_length"] = len(np_states)
 
-    # Invalid state: Arm empty, but A is held
-    invalid_state_arm_empty_A_held = [
-        0, 1,  # A not on table, B on table
-        0, 0,  # No on_block relations
-        0, 1,  # A not clear (because held), B clear
-        1,      # Arm empty (Error!)
-        1, 0,  # A held (Error!), B not held
-    ]
+        if len(np_states) > 1:
+            sum_changes_for_avg = 0
+            for i_tc in range(len(np_states) - 1):
+                diff_count = np.sum(np_states[i_tc] != np_states[i_tc + 1])
+                sum_changes_for_avg += diff_count
+            metrics["avg_changes_per_step"] = sum_changes_for_avg / (len(np_states) - 1)
+        else:
+            metrics["avg_changes_per_step"] = 0.0
 
-    # fmt: on
+        # Overall validity: no violations at all.
+        # The definition of "is_valid" might need refinement.
+        # For now, let's say it's valid if no *critical* violations.
+        # Or, simply, if all_violations_obj is empty.
+        # The original logic was: if all_violations is empty. Let's stick to that for now.
+        # "TRANS_NO_CHANGE" at goal is acceptable and shouldn't make it invalid.
+        # We need to filter out acceptable "TRANS_NO_CHANGE" violations before checking if all_violations_obj is empty.
 
-    valid, violations = validator._check_physical_constraints(valid_state)
-    print(f"Valid state check - Is valid: {valid}, Violations: {violations}")
+        final_violations_for_is_valid_check = []
+        for v_obj in all_violations_obj:
+            if v_obj.code == "TRANS_NO_CHANGE":
+                # Check if this "no change" occurred when the state was already the goal
+                # This requires knowing which state index this transition violation refers to.
+                # The message "Transition {i}->{i+1}" helps.
+                match_trans_idx = re.search(r"Transition (\d+)->(\d+)", v_obj.message)
+                if match_trans_idx:
+                    state_idx_before_no_change = int(match_trans_idx.group(1))
+                    if np.array_equal(np_states[state_idx_before_no_change], np_goal_state):
+                        continue  # This "no change" is acceptable, don't count for overall invalidity
+            final_violations_for_is_valid_check.append(v_obj)
 
-    valid, violations = validator._check_physical_constraints(invalid_state_floating_A)
-    print(f"Invalid state (floating A) check - Is valid: {valid}, Violations: {violations}")
-
-    valid, violations = validator._check_physical_constraints(invalid_state_arm_empty_A_held)
-    print(f"Invalid state (arm empty, A held) check - Is valid: {valid}, Violations: {violations}")
-
-    # Test sequence validation
-    # State 1: A on table, B on table, A clear, B clear, arm empty
-    s1 = [1, 1, 0, 0, 1, 1, 1, 0, 0]
-    # Action: pickup A
-    # State 2: B on table, B clear, arm NOT empty, A held
-    s2 = [0, 1, 0, 0, 0, 1, 0, 1, 0]  # A not clear, B clear, arm not empty, A held, B not on table
-
-    sequence = [s1, s2]
-    goal_state = s2
-
-    result = validator.validate_sequence(sequence, goal_state)
-    print("\nSequence validation result:")
-    print(f"Is valid: {result.is_valid}")
-    print(f"Violations: {result.violations}")
-    print(f"Metrics: {result.metrics}")
+        return ValidationResult(
+            is_valid=len(final_violations_for_is_valid_check) == 0,
+            violations=all_violations_obj,  # Return all, even if some are acceptable for is_valid
+            metrics=metrics,
+            goal_jaccard_score=jaccard,
+            goal_f1_score=f1,
+            predicted_plan_length=len(np_states),
+        )

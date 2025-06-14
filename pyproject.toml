@@ -13,6 +13,7 @@ dependencies = [
     "pandas>=2.3.0",
     "pddlpy>=0.4.4",
     "seaborn>=0.13.2",
+    "tensorboard>=2.19.0",
     "torch>=2.7.0",
     "transformers>=4.52.3",
 ]

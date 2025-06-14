@@ -1,0 +1,24 @@
+{
+    "num_samples": 1398,
+    "valid_sequence_rate": 0.0,
+    "goal_achievement_rate": 0.0,
+    "solved_rate_strict": 0.0,
+    "avg_predicted_plan_length": 50.0,
+    "avg_expert_plan_length": 8.380543633762517,
+    "avg_goal_jaccard_score": 0.2593364670617892,
+    "avg_goal_f1_score": 0.3901821195812603,
+    "avg_percent_physically_valid_states": 73.84692417739628,
+    "avg_percent_valid_transitions": 61.30331961110608,
+    "avg_plan_length_ratio_for_solved": 0.0,
+    "avg_plan_length_diff_for_solved": 0.0,
+    "violation_code_counts": {
+        "PHYS_BLOCK_MULTI_POS": 3356,
+        "PHYS_ARM_NOT_EMPTY_NOT_HOLDING_CONFLICT": 9138,
+        "TRANS_ILLEGAL_CHANGES": 26370,
+        "SEQ_GOAL_MISMATCH": 1398,
+        "PHYS_BLOCK_FLOATING": 8354,
+        "PHYS_CLEAR_CONFLICT": 1630,
+        "PHYS_ARM_MULTI_HOLD": 14,
+        "TRANS_NO_CHANGE": 138
+    }
+}

@@ -17,13 +17,13 @@ FD_PATH="${ROOT_DIR}downward/fast-downward.py"
 VALIDATE_PATH="${ROOT_DIR}VAL/validate"
 
 # PARSER_ENCODER_SCRIPT: Python script to parse VAL output, PDDL, and encode states
-PARSER_ENCODER_SCRIPT="./blocksworld/data/parse_and_encode.py"
+PARSER_ENCODER_SCRIPT="./data/parse_and_encode.py"
 
 # ANALYZE_AND_SPLIT_SCRIPT: Python script to analyze dataset and create train-test splits
-ANALYZE_AND_SPLIT_SCRIPT="./blocksworld/data/analyze_dataset_splits.py"
+ANALYZE_AND_SPLIT_SCRIPT="./data/analyze_dataset_splits.py"
 
 # OUTPUT_DIR: Directory to store generated PDDL problems, plans, VAL outputs, and final trajectories
-OUTPUT_DIR="./blocksworld/data"
+OUTPUT_DIR="./data"
 
 # MIN_BLOCKS & MAX_BLOCKS: Range of block numbers for problem generation
 MIN_BLOCKS_TO_GENERATE=4
@@ -75,14 +75,15 @@ echo "Base Output Directory: $OUTPUT_DIR"
 echo "***********************************"
 
 for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
-    BLOCK_OUTPUT_DIR="${OUTPUT_DIR}/blocks_${num_blocks}"
-    echo "Generating problems for $num_blocks blocks into $BLOCK_OUTPUT_DIR..."
+    # BLOCK_SPECIFIC_DATA_DIR is where manifest, pddl, plans, trajectories for this num_blocks go
+    BLOCK_SPECIFIC_DATA_DIR="${OUTPUT_DIR}/blocks_${num_blocks}".
+    echo "Generating problems for $num_blocks blocks into $BLOCK_SPECIFIC_DATA_DIR..."
 
-    mkdir -p "$BLOCK_OUTPUT_DIR/pddl"
-    mkdir -p "$BLOCK_OUTPUT_DIR/plans"
-    mkdir -p "$BLOCK_OUTPUT_DIR/val_out"
-    mkdir -p "$BLOCK_OUTPUT_DIR/trajectories_text"
-    mkdir -p "$BLOCK_OUTPUT_DIR/trajectories_bin"
+    mkdir -p "$BLOCK_SPECIFIC_DATA_DIR/pddl"
+    mkdir -p "$BLOCK_SPECIFIC_DATA_DIR/plans"
+    mkdir -p "$BLOCK_SPECIFIC_DATA_DIR/val_out"
+    mkdir -p "$BLOCK_SPECIFIC_DATA_DIR/trajectories_text"
+    mkdir -p "$BLOCK_SPECIFIC_DATA_DIR/trajectories_bin"
 
     successful_for_size=0
 
@@ -95,14 +96,14 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
         SEED=$(( (num_blocks * 1000) + i )) # Simple way to get different seeds
         PROBLEM_BASENAME="blocks_${num_blocks}_problem_${i}"
 
-        PDDL_FILE="${BLOCK_OUTPUT_DIR}/pddl/${PROBLEM_BASENAME}.pddl"
-        PLAN_FILE="${BLOCK_OUTPUT_DIR}/plans/${PROBLEM_BASENAME}.plan"
-        VAL_OUTPUT_FILE="${BLOCK_OUTPUT_DIR}/val_out/${PROBLEM_BASENAME}.val.log"
-        
+        PDDL_FILE="${BLOCK_SPECIFIC_DATA_DIR}/pddl/${PROBLEM_BASENAME}.pddl"
+        PLAN_FILE="${BLOCK_SPECIFIC_DATA_DIR}/plans/${PROBLEM_BASENAME}.plan"
+        VAL_OUTPUT_FILE="${BLOCK_SPECIFIC_DATA_DIR}/val_out/${PROBLEM_BASENAME}.val.log"
+
         # For parse_and_encode.py outputs
-        TEXT_TRAJECTORY_FILE="${BLOCK_OUTPUT_DIR}/trajectories_text/${PROBLEM_BASENAME}.traj.txt"
-        BINARY_TRAJECTORY_FILE="${BLOCK_OUTPUT_DIR}/trajectories_bin/${PROBLEM_BASENAME}.traj.bin" # Or .npz, .pt, etc.
-        GOAL_BINARY_FILE="${BLOCK_OUTPUT_DIR}/trajectories_bin/${PROBLEM_BASENAME}.goal.bin"
+        TEXT_TRAJECTORY_FILE="${BLOCK_SPECIFIC_DATA_DIR}/trajectories_text/${PROBLEM_BASENAME}.traj.txt"
+        BINARY_TRAJECTORY_FILE="${BLOCK_SPECIFIC_DATA_DIR}/trajectories_bin/${PROBLEM_BASENAME}.traj.bin" # Or .npz, .pt, etc.
+        GOAL_BINARY_FILE="${BLOCK_SPECIFIC_DATA_DIR}/trajectories_bin/${PROBLEM_BASENAME}.goal.bin"
 
         echo -e "\n"
         echo "  Processing: $PROBLEM_BASENAME (Seed: $SEED)"
@@ -163,7 +164,8 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
             --num_blocks "$num_blocks" \
             --text_trajectory_output "$TEXT_TRAJECTORY_FILE" \
             --binary_trajectory_output "$BINARY_TRAJECTORY_FILE" \
-            --binary_goal_output "$GOAL_BINARY_FILE"
+            --binary_goal_output "$GOAL_BINARY_FILE" \
+            --manifest_output_dir "$BLOCK_SPECIFIC_DATA_DIR" # Manifest goes into blocks_N dir
         
         if [ $? -ne 0 ]; then
             echo "    ERROR: Parsing/Encoding failed for $PROBLEM_BASENAME"
@@ -184,10 +186,10 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
         # `dataset_dir`: Path to the root directory of the generated dataset (containing 'plans' subdirectory).
         # `output_dir`: Directory to save the split files (train_files.txt, etc.) and distribution plots.
     echo -e "\n"
-    echo "Analyzing dataset splits for $PROBLEM_BASENAME..."
+    echo "Analyzing dataset splits for $num_blocks blocks..."
     uv run python "$ANALYZE_AND_SPLIT_SCRIPT" \
-        "$BLOCK_OUTPUT_DIR" "$BLOCK_OUTPUT_DIR"
-    
+        "$BLOCK_SPECIFIC_DATA_DIR" "$BLOCK_SPECIFIC_DATA_DIR"
+
     if [ $? -ne 0 ]; then
         echo "ERROR: Dataset analysis failed for $PROBLEM_BASENAME"
         TOTAL_FAILED_ENCODING=$((TOTAL_FAILED_ENCODING + 1))

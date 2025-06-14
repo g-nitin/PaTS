@@ -1,6 +1,7 @@
 import argparse
 import os
 import re
+from pathlib import Path
 
 import numpy as np
 import pddlpy  # For parsing PDDL files
@@ -56,7 +57,13 @@ def normalize_predicate_string(p_str_unnormalized):
 
     # Ensure it's wrapped in parentheses if not already (e.g. "handempty" from VAL)
     if not (content.startswith("(") and content.endswith(")")):
-        content = f"({content})"
+        # VAL sometimes outputs "handempty" without parens.
+        # The PDDL standard is (predicate ...).
+        # Our master list uses (arm-empty). Let's be flexible with VAL's "handempty".
+        if content.lower() == "handempty":
+            content = "(arm-empty)"  # Normalize to our standard
+        else:
+            content = f"({content})"
 
     # Get content within the outermost parens and strip whitespace
     inner_content = content[1:-1].strip()
@@ -65,6 +72,10 @@ def normalize_predicate_string(p_str_unnormalized):
         return "()"
 
     parts = inner_content.lower().split()  # Split into predicate name and args, convert to lowercase
+
+    # Normalize "handempty" to "arm-empty" if it appears as a predicate name
+    if parts[0] == "handempty":
+        parts[0] = "arm-empty"
 
     # Reconstruct with single spaces
     if len(parts) > 1:
@@ -95,6 +106,10 @@ def pddlpy_pred_to_normalized_string(pred_input):
         return "()"
 
     pred_name = str(predicate_parts[0]).lower()
+    # Normalize "handempty" to "arm-empty" at the source
+    if pred_name == "handempty":
+        pred_name = "arm-empty"
+
     pred_args = [str(arg).lower() for arg in predicate_parts[1:]]
 
     if pred_args:
@@ -134,7 +149,9 @@ def get_goal_preds_from_pddlpy(problem_goal_literal):
             # raise NotImplementedError(f"Unsupported PDDL goal operator: {op_name}")
         else:  # It's a simple predicate
             args_lower = tuple(str(a).lower() for a in literal_node.args)
-            goal_predicate_tuples.add((op_name,) + args_lower)
+            # Normalize predicate name here too if necessary, e.g., handempty -> arm-empty
+            final_op_name = "arm-empty" if op_name == "handempty" else op_name
+            goal_predicate_tuples.add((final_op_name,) + args_lower)
 
     extract_conjunctive_goals_recursive(problem_goal_literal)
 
@@ -235,6 +252,8 @@ def main():
         "--binary_trajectory_output", required=True, help="Path to save binary encoded state trajectory (.npy)."
     )
     parser.add_argument("--binary_goal_output", required=True, help="Path to save binary encoded goal state (.npy).")
+    parser.add_argument("--manifest_output_dir", required=True, help="Directory to save the predicate manifest file.")
+
     args = parser.parse_args()
 
     print(f"    INFO: Processing {args.pddl_problem_file} with {args.val_output_file}")
@@ -245,6 +264,16 @@ def main():
         if not ordered_master_pred_list:
             print(f"ERROR: Could not generate master predicate list for {args.num_blocks} blocks.")
             exit(1)
+
+        # Save the predicate manifest
+        manifest_dir = Path(args.manifest_output_dir)
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        manifest_file_path = manifest_dir / f"predicate_manifest_{args.num_blocks}.txt"
+        # Only write if it doesn't exist or if we want to ensure it's always fresh (for now, write always)
+        with open(manifest_file_path, "w") as f_manifest:
+            for pred_item in ordered_master_pred_list:
+                f_manifest.write(f"{pred_item}\n")
+        print(f"    INFO: Predicate manifest saved to: {manifest_file_path}")
 
         # 2. Parse PDDL domain and problem files using pddlpy
         try:

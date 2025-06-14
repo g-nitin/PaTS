@@ -1,5 +1,4 @@
 import argparse
-import json  # For saving metrics
 import re  # For extracting num_blocks from filenames
 from pathlib import Path  # For more robust path handling
 
@@ -7,7 +6,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from BlocksWorldValidator import BlocksWorldValidator
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, pad_sequence
 from torch.utils.data import DataLoader, Dataset
 
@@ -374,81 +372,6 @@ def generate_plan_lstm(model, initial_state_np, goal_state_np, max_plan_length=5
     return generated_plan_np
 
 
-def evaluate_on_test_set(model, test_dataloader, num_blocks_for_validator, max_plan_length_eval=50):
-    print("\n** Evaluating on Test Set using BlocksWorldValidator **")
-    model.eval()
-
-    validator = BlocksWorldValidator(num_blocks=num_blocks_for_validator)
-
-    all_generated_plans_list_of_lists = []
-    all_expert_plans_list_of_lists = []  # Targets for the validator
-    all_goal_states_list = []
-
-    total_problems = 0
-
-    for batch_data in test_dataloader:
-        if batch_data is None:
-            continue
-
-        ids = batch_data["ids"]
-        # For evaluation, we process one by one from the batch
-        for i in range(len(ids)):
-            problem_id = ids[i]
-            expert_trajectory_tensor = batch_data["expert_trajectories"][i]
-
-            if expert_trajectory_tensor.numel() == 0:
-                print(f"Skipping {problem_id} due to empty expert trajectory.")
-                continue
-
-            initial_state_np = expert_trajectory_tensor[0].cpu().numpy()  # S0
-            goal_state_np = batch_data["goal_states"][i].cpu().numpy()  # S_G from dataset item
-            expert_plan_full_np = expert_trajectory_tensor.cpu().numpy()  # S0, S1, ..., ST_expert
-
-            # print(f"Evaluating {problem_id}...")
-            generated_plan_np = generate_plan_lstm(model, initial_state_np, goal_state_np, max_plan_length_eval)
-
-            total_problems += 1
-
-            # Convert numpy arrays to List[List[int]] for the validator
-            generated_plan_as_list = [state.astype(int).tolist() for state in generated_plan_np]
-            expert_plan_as_list = [state.astype(int).tolist() for state in expert_plan_full_np]
-            goal_state_as_list = goal_state_np.astype(int).tolist()
-
-            all_generated_plans_list_of_lists.append(generated_plan_as_list)
-            all_expert_plans_list_of_lists.append(expert_plan_as_list)
-            all_goal_states_list.append(goal_state_as_list)
-
-    metrics = {}
-    if total_problems > 0:
-        print(f"Validator performing checks for {num_blocks_for_validator} blocks configuration.")
-        metrics = validator.compute_performance_metrics(
-            predictions=all_generated_plans_list_of_lists,
-            targets=all_expert_plans_list_of_lists,
-            goal_states=all_goal_states_list,
-        )
-        # You can add custom metrics or counts if needed, e.g.:
-        metrics["total_problems_processed_by_script"] = total_problems
-    else:
-        print("No problems were evaluated.")
-        # Initialize with keys expected from validator.compute_performance_metrics for consistency
-        metrics = {
-            "valid_sequence_rate": 0.0,
-            "goal_achievement_rate": 0.0,
-            "avg_sequence_length": 0.0,
-            "avg_changes_per_step": 0.0,
-            "exact_match_rate": 0.0,
-            "total_problems_processed_by_script": 0,
-        }
-
-    print("\n** Test Set Evaluation Summary (from BlocksWorldValidator) **")
-    for k, v_metric in metrics.items():
-        if isinstance(v_metric, float):
-            print(f"  {k}: {v_metric:.4f}")
-        else:
-            print(f"  {k}: {v_metric}")
-    return metrics
-
-
 # ** Helper to load problem basenames from split files **
 def load_problem_basenames(split_file_path: Path):
     if not split_file_path.exists():
@@ -461,7 +384,7 @@ def load_problem_basenames(split_file_path: Path):
 
 # ** Main Execution **
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="LSTM Training and Evaluation")
+    parser = argparse.ArgumentParser(description="LSTM Training")
     parser.add_argument("dataset_dir", type=str, help="Path to the dataset directory")
     parser.add_argument("dataset_split", type=str, help="Path to the dataset split files")
     parser.add_argument("output_dir", type=str, help="Path to the output directory")
@@ -517,27 +440,6 @@ if __name__ == "__main__":
     ACTUAL_NUM_FEATURES = train_dataset.num_features
     print(f"Using ACTUAL_NUM_FEATURES = {ACTUAL_NUM_FEATURES} for N={TARGET_NUM_BLOCKS}")
 
-    # Add a validation check for feature size consistency
-    temp_validator_for_check = BlocksWorldValidator(num_blocks=TARGET_NUM_BLOCKS)
-    expected_features_by_validator = temp_validator_for_check.state_size
-    if ACTUAL_NUM_FEATURES != expected_features_by_validator:
-        print(f"CRITICAL ERROR: Feature size mismatch for N={TARGET_NUM_BLOCKS}!")
-        print(
-            f"  Dataset (e.g., from {train_dataset.trajectory_files[0] if train_dataset.trajectory_files else 'N/A'}) reports {ACTUAL_NUM_FEATURES} features."
-        )
-        print(
-            f"  BlocksWorldValidator expects {expected_features_by_validator} features for {TARGET_NUM_BLOCKS} blocks."
-        )
-        print(
-            "  This indicates an inconsistency between data generation/encoding (parse_and_encode.py) and the validator's setup."
-        )
-        print("  Please ensure the predicate vocabulary and order match.")
-        exit(1)  # Critical error, should not proceed
-    print(
-        f"Feature size consistency check passed: Dataset features ({ACTUAL_NUM_FEATURES}) == Validator expected features ({expected_features_by_validator}) for N={TARGET_NUM_BLOCKS}."
-    )
-    del temp_validator_for_check  # Clean up
-
     val_dataset = BWTrajectoryDataset(val_basenames_all, PATS_DATASET_DIR, TARGET_NUM_BLOCKS)
     test_dataset = BWTrajectoryDataset(test_basenames_all, PATS_DATASET_DIR, TARGET_NUM_BLOCKS)
 
@@ -548,9 +450,7 @@ if __name__ == "__main__":
     train_dataloader = DataLoader(
         train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=0
     )
-    val_dataloader = DataLoader(
-        val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0
-    )
+    val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0)
     test_dataloader = DataLoader(
         test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0
     )
@@ -563,64 +463,14 @@ if __name__ == "__main__":
     print(f"Total trainable parameters: {total_params}")
 
     # ** 3. Training **
-    DO_TRAINING = True  # Set to False to skip training and only evaluate (if model exists)
     CLIP_GRAD_NORM = 1.0  # Gradient clipping norm, can be None to disable
-    if DO_TRAINING:
-        print(f"Starting training for N={TARGET_NUM_BLOCKS}...")
-        train_model(model, train_dataloader, NUM_EPOCHS, LEARNING_RATE, MODEL_SAVE_PATH, CLIP_GRAD_NORM)
-    else:
-        print(f"Skipping training. Attempting to load model from {MODEL_SAVE_PATH}")
+    print(f"Starting training for N={TARGET_NUM_BLOCKS}...")
+    train_model(model, train_dataloader, NUM_EPOCHS, LEARNING_RATE, MODEL_SAVE_PATH, CLIP_GRAD_NORM)
 
-    # ** 4. Evaluation on Test Set **
     if Path(MODEL_SAVE_PATH).exists():
-        print(f"Loading model from {MODEL_SAVE_PATH} for evaluation...")
-        checkpoint = torch.load(MODEL_SAVE_PATH, map_location=DEVICE)
-
-        # Check if loaded model matches current config (especially num_features for the target N)
-        loaded_num_features = checkpoint.get("num_features")
-        loaded_target_n_blocks = checkpoint.get("target_num_blocks", None)
-
-        if loaded_target_n_blocks is not None and loaded_target_n_blocks != TARGET_NUM_BLOCKS:
-            print(
-                f"Warning: Model {MODEL_SAVE_PATH} was trained for N={loaded_target_n_blocks}, "
-                f"but current evaluation is for N={TARGET_NUM_BLOCKS}. Results might be misleading."
-            )
-
-        if loaded_num_features != ACTUAL_NUM_FEATURES:
-            print(
-                f"Error: Num features mismatch! Model trained with {loaded_num_features}, "
-                f"current data for N={TARGET_NUM_BLOCKS} has {ACTUAL_NUM_FEATURES}. Cannot evaluate."
-            )
-            exit()
-
-        model.load_state_dict(checkpoint["model_state_dict"])
-        print(f"Model loaded. Epoch: {checkpoint.get('epoch', 'N/A')}, Loss: {checkpoint.get('loss', 'N/A'):.4f}")
-
-        if len(test_dataset) > 0:
-            # Determine max plan length for evaluation dynamically or set a generous fixed one
-            # For dynamic, you might iterate through test_dataset once to find max expert plan length
-            max_expert_len = 0
-            for item_idx in range(len(test_dataset)):
-                item = test_dataset[item_idx]
-                if item and item["expert_trajectory"] is not None:
-                    max_expert_len = max(max_expert_len, len(item["expert_trajectory"]))
-
-            max_plan_length_for_eval = max_expert_len + 15 if max_expert_len > 0 else 50  # Add some slack
-            print(
-                f"Max expert plan length in test set: {max_expert_len}. Using max_plan_length_for_eval = {max_plan_length_for_eval}"
-            )
-
-            test_metrics = evaluate_on_test_set(
-                model, test_dataloader, TARGET_NUM_BLOCKS, max_plan_length_eval=max_plan_length_for_eval
-            )
-
-            # Save metrics to JSON
-            with open(RESULTS_SAVE_PATH, "w") as f:
-                json.dump(test_metrics, f, indent=4)
-            print(f"Test metrics saved to {RESULTS_SAVE_PATH}")
-        else:
-            print(f"No test data found for N={TARGET_NUM_BLOCKS} to evaluate.")
+        print(f"LSTM Model training/loading complete. Model available at {MODEL_SAVE_PATH}")
+        print("To evaluate, use the benchmark.py script.")
     else:
-        print(f"Model file not found at {MODEL_SAVE_PATH}. Cannot evaluate.")
+        print("LSTM Model training was skipped and no pre-trained model found.")
 
-    print(f"**** Script for TARGET_NUM_BLOCKS = {TARGET_NUM_BLOCKS} finished. ****")
+    print(f"**** LSTM Script for TARGET_NUM_BLOCKS = {TARGET_NUM_BLOCKS} finished. ****")

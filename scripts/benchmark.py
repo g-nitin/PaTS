@@ -31,9 +31,7 @@ class PlannableModel(ABC):
         pass
 
     @abstractmethod
-    def predict_sequence(
-        self, initial_state_np: np.ndarray, goal_state_np: np.ndarray, max_length: int
-    ) -> List[List[int]]:
+    def predict_sequence(self, initial_state_np: np.ndarray, goal_state_np: np.ndarray, max_length: int) -> List[List[int]]:
         """
         Predicts a sequence of states (plan).
         Inputs are 0/1 numpy arrays. Output is List of 0/1 state lists.
@@ -69,9 +67,7 @@ class TTMWrapper(PlannableModel):
             f"TTM model loaded. Context: {self.config.context_length}, Pred Len: {self.config.prediction_length}, State Dim: {self.config.state_dim}"
         )
 
-    def predict_sequence(
-        self, initial_state_np: np.ndarray, goal_state_np: np.ndarray, max_length: int
-    ) -> List[List[int]]:
+    def predict_sequence(self, initial_state_np: np.ndarray, goal_state_np: np.ndarray, max_length: int) -> List[List[int]]:
         if self.model is None or self.config is None:
             raise RuntimeError("TTM model not loaded. Call load_model() first.")
 
@@ -88,9 +84,7 @@ class TTMWrapper(PlannableModel):
 
         # The existing TTM predict method returns a tensor of shape (batch_size, prediction_length, num_features)
         # with values 0.0 or 1.0.
-        predicted_plan_tensor_01 = self.ttm_instance.predict(
-            initial_state_tensor, goal_state_tensor
-        )  # (1, pred_len, F)
+        predicted_plan_tensor_01 = self.ttm_instance.predict(initial_state_tensor, goal_state_tensor)  # (1, pred_len, F)
 
         # Convert to List[List[int]]
         # Squeeze batch dimension, convert to numpy, then to list of lists
@@ -148,9 +142,7 @@ class LSTMWrapper(PlannableModel):
         # dropout_prob is not typically saved, assume a default or make it part of config if needed
 
         if not all([num_features, hidden_size, num_lstm_layers]):
-            raise ValueError(
-                "LSTM checkpoint missing required parameters (num_features, hidden_size, num_lstm_layers)."
-            )
+            raise ValueError("LSTM checkpoint missing required parameters (num_features, hidden_size, num_lstm_layers).")
 
         self._state_dim = num_features
         self.lstm_model = PaTS_LSTM(num_features, hidden_size, num_lstm_layers).to(self.device)
@@ -159,9 +151,7 @@ class LSTMWrapper(PlannableModel):
         self.model = self.lstm_model  # For consistency with PlannableModel
         print(f"LSTM model loaded. Features: {num_features}, Hidden: {hidden_size}, Layers: {num_lstm_layers}")
 
-    def predict_sequence(
-        self, initial_state_np: np.ndarray, goal_state_np: np.ndarray, max_length: int
-    ) -> List[List[int]]:
+    def predict_sequence(self, initial_state_np: np.ndarray, goal_state_np: np.ndarray, max_length: int) -> List[List[int]]:
         if self.lstm_model is None:
             raise RuntimeError("LSTM model not loaded. Call load_model() first.")
 
@@ -200,6 +190,20 @@ class LSTMWrapper(PlannableModel):
         if self._state_dim is None:
             raise ValueError("LSTM model not loaded or state_dim not set.")
         return self._state_dim
+
+
+def get_plannable_model(model_type: str, model_path: Path, num_blocks: int, device: torch.device) -> PlannableModel:
+    """Factory function to get a PlannableModel instance."""
+    model_type_lower = model_type.lower()
+    if model_type_lower == "ttm":
+        return TTMWrapper(model_path, num_blocks, device)
+    elif model_type_lower == "lstm":
+        return LSTMWrapper(model_path, num_blocks, device)
+    # elif model_type_lower == "plansformer":
+    #     # return PlansformerWrapper(model_path, num_blocks, device) # Placeholder
+    #     raise NotImplementedError("Plansformer wrapper not yet implemented.")
+    else:
+        raise ValueError(f"Unsupported model type for PlannableModel factory: {model_type}")
 
 
 # ** Helper Functions for Benchmarking **
@@ -321,13 +325,14 @@ def run_benchmark(args: argparse.Namespace):
     print(f"Validator initialized for N={num_blocks} with state_size={validator.state_size}.")
 
     # Initialize Model
-    wrapped_model: PlannableModel
-    if model_type == "ttm":
-        wrapped_model = TTMWrapper(model_path, num_blocks, DEVICE)
-    elif model_type == "lstm":
-        wrapped_model = LSTMWrapper(model_path, num_blocks, DEVICE)
-    else:
-        raise ValueError(f"Unsupported model type: {model_type}")
+    try:
+        wrapped_model: PlannableModel = get_plannable_model(model_type, model_path, num_blocks, DEVICE)
+    except ValueError as e:
+        print(f"ERROR: Could not initialize model: {e}")
+        return  # or exit
+    except NotImplementedError as e:
+        print(f"ERROR: Model type not implemented: {e}")
+        return  # or exit
 
     wrapped_model.load_model()
 
@@ -374,9 +379,7 @@ def run_benchmark(args: argparse.Namespace):
         all_expert_plan_lengths.append(expert_trajectory_np.shape[0])
 
         # Predict plan
-        predicted_plan_list_of_lists = wrapped_model.predict_sequence(
-            initial_state_np, goal_state_np, max_generation_steps
-        )
+        predicted_plan_list_of_lists = wrapped_model.predict_sequence(initial_state_np, goal_state_np, max_generation_steps)
 
         # Validate
         validation_res = validator.validate_sequence(predicted_plan_list_of_lists, goal_state_np)  # type: ignore
@@ -427,9 +430,7 @@ def run_benchmark(args: argparse.Namespace):
                     "goal_achievement": res.metrics.get("goal_achievement", 0.0),
                     "goal_jaccard_score": res.goal_jaccard_score,
                     "goal_f1_score": res.goal_f1_score,
-                    "violations": [
-                        {"code": v.code, "message": v.message, "details": v.details} for v in res.violations
-                    ],
+                    "violations": [{"code": v.code, "message": v.message, "details": v.details} for v in res.violations],
                 }
             )
         detailed_filename = f"detailed_benchmark_results_{model_type}_{Path(model_path).stem}_N{num_blocks}.json"

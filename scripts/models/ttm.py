@@ -1,13 +1,10 @@
-import argparse
 import json
 import math
 import posixpath
 import re
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path, PosixPath
-from pprint import pformat
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -20,7 +17,6 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from transformers.modeling_utils import PreTrainedModel
 from transformers.trainer import Trainer
 from transformers.trainer_callback import EarlyStoppingCallback, TrainerCallback
-from transformers.trainer_utils import set_seed
 from transformers.training_args import TrainingArguments
 from tsfm_public import TrackingCallback  # type: ignore
 from tsfm_public.toolkit.get_model import get_model  # type: ignore
@@ -527,137 +523,3 @@ def prepare_datasets(
     )
 
     return train_dataset_instance, val_dataset_instance, test_dataset_instance, state_dim, max_plan_len_in_train_data
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Train a TTM model on the BlocksWorld domain.")
-    parser.add_argument(
-        "--dataset_dir",
-        type=Path,
-        required=True,
-        help="Path to the PaTS dataset directory for a specific N (e.g., data/blocks_4), containing trajectories_bin and predicate_manifest.",
-    )
-    parser.add_argument(
-        "--dataset_split_dir",
-        type=Path,
-        required=True,
-        help="Path to the directory containing train_files.txt, val_files.txt (e.g., data/blocks_4). Can be same as dataset_dir.",
-    )
-    parser.add_argument("--num_blocks", type=int, required=True, help="Number of blocks for this training run (e.g., 4).")
-
-    parser.add_argument(
-        "--output_dir",
-        type=Path,
-        default=Path("output_blocksworld_ttm"),
-        help="Directory to save models, logs, and results.",
-    )
-
-    # Model and training parameters
-    parser.add_argument(
-        "--ttm_model_path",
-        type=str,
-        default=DEFAULT_TTM_MODEL_PATH,
-        help="Base TTM model path from HuggingFace or local. Default to 'ibm-granite/granite-timeseries-ttm-r2'.",
-    )
-    parser.add_argument(
-        "--context_length",
-        type=int,
-        help="Context length for TTM. If not provided, determined from dataset.",
-    )
-    parser.add_argument(
-        "--prediction_length",
-        type=int,
-        help="Prediction length for TTM. If not provided, determined from dataset.",
-    )
-    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate. Default is 1e-4.")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size. Default is 32.")
-    parser.add_argument("--num_epochs", type=int, default=50, help="Number of training epochs. Default is 50.")
-
-    # Other parameters
-    parser.add_argument("--seed", type=int, default=13, help="Random seed. Default is 13.")
-    parser.add_argument(
-        "--log_level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Logging level. Default is INFO.",
-    )
-
-    args = parser.parse_args()
-
-    # Ensure output_dir uses num_blocks to avoid conflicts if running for multiple N
-    # Example: output_blocksworld_ttm/N4/
-    args.output_dir = args.output_dir / f"N{args.num_blocks}"
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    log_file = args.output_dir / f"run_ttm_N{args.num_blocks}.log"
-    setup_logging(args.log_level, log_file)
-
-    logger.info(f"Script arguments: {pformat(vars(args))}")
-    set_seed(args.seed)
-    logger.info(f"Random seed set to: {args.seed}")
-
-    # num_blocks is now a direct argument
-    logger.info(f"Number of blocks for this run: {args.num_blocks}")
-    logger.info("** Starting Training Mode **")
-
-    # Prepare datasets first to get state_dim and actual max_plan_len_in_train_data
-    # Note: prepare_datasets now returns max_plan_len_in_train_data calculated from the actual loaded dataset
-    train_ds, val_ds, _, state_dim, actual_max_plan_len_in_train_data = prepare_datasets(
-        args.dataset_dir,
-        args.dataset_split_dir,
-        args.num_blocks,
-        args.context_length or 0,  # Pass 0 if not specified, determine_ttm_lengths will handle
-        args.prediction_length or 0,  # Pass 0 if not specified
-        args.seed,
-    )
-
-    auto_context_length, auto_prediction_length = determine_ttm_lengths(
-        actual_max_plan_len_in_train_data,  # Use actual max plan length from training data
-        actual_max_plan_len_in_train_data + 2,  # Recommended prediction length
-        args.context_length,  # User override
-        args.prediction_length,  # User override
-    )
-
-    model_cfg = ModelConfig(
-        context_length=auto_context_length,
-        prediction_length=auto_prediction_length,
-        learning_rate=args.learning_rate,
-        batch_size=args.batch_size,
-        num_epochs=args.num_epochs,
-        ttm_model_path=args.ttm_model_path,
-        seed=args.seed,
-        state_dim=state_dim,  # Use state_dim from prepare_datasets
-    )
-    logger.info(f"Using ModelConfig: {pformat(asdict(model_cfg))}")
-
-    # Check if train_ds is None or empty
-    if not train_ds or len(train_ds) == 0:  # type: ignore
-        logger.error("Training dataset is empty or None after preparation. Cannot train.")
-        return 1
-
-    ttm_model = BlocksWorldTTM(model_cfg, device=DEVICE, output_dir=args.output_dir)
-    ttm_model.train(train_ds, val_ds)
-
-    final_model_assets_path = args.output_dir / "final_model_assets"
-    if final_model_assets_path.exists():
-        logger.warning(
-            f"Model save path {final_model_assets_path} already exists."
-            f"\nSuffixing `final_model_assets` with current timestamp (formatted nicely) to avoid overwriting."
-        )
-        final_model_assets_path = final_model_assets_path.with_name(
-            f"final_model_assets_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        )
-
-    logger.info(f"Saving model assets to {final_model_assets_path}")
-    ttm_model.save(final_model_assets_path)
-
-    logger.info(f"Training complete. Model saved to {final_model_assets_path}")
-    logger.info("To evaluate, use the benchmark.py script.")
-
-    logger.info("TTM script finished.")
-    return 0
-
-
-if __name__ == "__main__":
-    # Wrap main call to exit with its return code
-    sys.exit(main())

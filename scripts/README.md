@@ -10,16 +10,31 @@ The typical workflow for using PaTS is:
 
 2.  **Model Training**:
 
-    - Choose a model script (e.g., `scripts/models/ttm.py` or `scripts/models/lstm.py`).
-    - Configure training parameters within the script or via its command-line arguments (e.g., dataset path, output directory, hyperparameters).
-    - Run the training script. For example:
+    - Use the unified training script `scripts/train_model.py`.
+    - Specify the `model_type` (e.g., `ttm`, `lstm`) and other relevant parameters.
+    - Example:
+
       ```bash
       # For TTM
-      uv run python scripts/models/ttm.py --dataset_dir data/blocks_4 --dataset_split_dir data/blocks_4 --num_blocks--num_epochs 100
+      uv run python scripts/train_model.py \
+          --model_type ttm \
+          --dataset_dir data/blocks_4 \
+          --dataset_split_dir data/blocks_4 \
+          --num_blocks 4 \
+          --output_dir ./training_outputs \
+          --num_epochs 100
+
       # For LSTM
-      uv run python scripts/models/lstm.py data/blocks_4 output_lstm_N4 --num_blocks 4 --epochs 100
+      uv run python scripts/train_model.py \
+          --model_type lstm \
+          --dataset_dir data/blocks_4 \
+          --dataset_split_dir data/blocks_4 \
+          --num_blocks 4 \
+          --output_dir ./training_outputs \
+          --epochs 200
       ```
-    - The script will load data based on the `train_files.txt` and `val_files.txt` (or its own splitting logic), train the model, and save the trained model weights and configuration.
+
+    - The script loads data based on `train_files.txt` and `val_files.txt`, trains the specified model, and saves weights/configuration to a subdirectory within `--output_dir` (e.g., `./training_outputs/ttm_N4/`).
 
 3.  **Model Evaluation (Benchmarking)**:
     - Use the `scripts/benchmark.py` script for comprehensive evaluation.
@@ -29,8 +44,8 @@ The typical workflow for using PaTS is:
       uv run python scripts/benchmark.py \
           --dataset_dir ./data \
           --num_blocks 4 \
-          --model_type ttm \
-          --model_path ./output_ttm_N4/final_model_assets \
+          --model_type ttm \ # or lstm
+          --model_path ./training_outputs/ttm_N4/final_model_assets \ # Adjust path based on actual saved model
           --output_dir ./benchmark_results_ttm_N4
       ```
     - The script loads test problems specified in `data/blocks_<N>/test_files.txt`, uses the appropriate model wrapper to generate plans, validates them using `BlocksWorldValidator` (which uses the predicate manifest), and computes a range of metrics.
@@ -40,6 +55,7 @@ The typical workflow for using PaTS is:
 - **`data/generate_dataset.sh`**: Automates the entire data generation pipeline from PDDL problem generation to encoded trajectories and predicate manifests.
 - **`data/parse_and_encode.py`**: Parses PDDL files (for initial/goal states) and VAL output logs (for state transitions), reconstructs state trajectories, encodes them into binary vectors based on a generated predicate order, and saves the binary data along with the crucial `predicate_manifest_<N>.txt` file.
 - **`data/analyze_dataset_splits.py`**: Analyzes the generated dataset for distributions and splits it into training, validation, and test sets, creating `*_files.txt`.
+- **`scripts/train_model.py`**: The **central script for training PaTS models (LSTM, TTM, etc.)**. It handles dataset loading, model instantiation, and invoking model-specific training loops.
 - **`scripts/pats_dataset.py`**: Contains the `PaTSDataset` class, a unified PyTorch Dataset for loading pre-encoded binary trajectories and goal states from `.npy` files based on split file lists (e.g., `train_files.txt`).
 - **`scripts/BlocksWorldValidator.py`**:
   - Contains the `BlocksWorldValidator` class responsible for checking the physical validity of individual states and the legality of transitions between states in the Blocks World domain.
@@ -53,8 +69,8 @@ The typical workflow for using PaTS is:
   - Passes the generated plan and goal state to an instance of `BlocksWorldValidator` (configured with the correct predicate manifest) for validation.
   - Collects detailed `ValidationResult` objects for each problem.
   - Computes and outputs aggregated performance metrics.
-- **`scripts/models/ttm.py`**: Implements training and prediction logic for the Tiny Time Mixer (TTM) model. It uses `PaTSDataset` for data loading and a custom `TTMDataCollator` to prepare batches in the format TTM expects (including context/prediction windowing, padding, and scaling based on the `predicate_manifest_<N>.txt` for `state_dim`). Its main focus is now on training and saving models.
-- **`scripts/models/lstm.py`**: Implements training and prediction logic for a baseline LSTM model. It uses `PaTSDataset` for data loading and a custom `lstm_collate_fn` to prepare batches (padding sequences, etc.). Its main focus is now on training and saving models.
+- **`scripts/models/ttm.py`**: Contains the `BlocksWorldTTM` class (managing TTM training and prediction), `TTMDataCollator`, and related utilities. Training is orchestrated by `scripts/train_model.py`.
+- **`scripts/models/lstm.py`**: Contains the `PaTS_LSTM` model definition (an `nn.Module`) and the `lstm_collate_fn`. Training is orchestrated by `scripts/train_model.py`.
 - **`scripts/models/plansformer.py`**: (Placeholder) Intended for a Transformer-based planning model.
 
 ## Benchmarking and Evaluation (`scripts/benchmark.py`)

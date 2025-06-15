@@ -37,55 +37,50 @@ After generation, `data/blocks_<N>/` will contain the PDDL files, plans, VAL log
 
 ### 2. Training a Model (Example: TTM)
 
-(Assumes dataset for N=4 blocks has been generated and `data/blocks_4/train_files.txt`, `data/blocks_4/predicate_manifest_4.txt`, etc. exist)
-
-The TTM script (`scripts/models/ttm.py`) now directly uses the split files (`train_files.txt`, `val_files.txt`) and the predicate manifest, similar to the LSTM script. It requires paths to the dataset directory (containing `trajectories_bin/` and `predicate_manifest_<N>.txt`) and the dataset split directory (containing `train_files.txt`, etc.), along with the number of blocks.
+(Assumes dataset for N=4 blocks has been generated and `data/blocks_4/train_files.txt`, etc. exist)
 
 ```bash
 # From the project root directory
-uv run python scripts/models/ttm.py \
+uv run python scripts/train_model.py \
+    --model_type ttm \
     --dataset_dir data/blocks_4 \
     --dataset_split_dir data/blocks_4 \
     --num_blocks 4 \
-    --output_dir ./output_ttm_N4_new \
+    --output_dir ./training_outputs \
     --num_epochs 100 \
     --batch_size 32 \
     --learning_rate 1e-4 \
-    # --context_length 60 \ # Optional: TTM can auto-determine this
-    # --prediction_length 60 \ # Optional: TTM can auto-determine this
-    --seed 42
+    # --ttm_model_path "ibm-granite/granite-timeseries-ttm-r2" # Optional: specify base TTM model
+    # --context_length 60 \ # Optional: TTM can auto-determine this if not provided
+    # --prediction_length 60 \ # Optional: TTM can auto-determine this if not provided
+    --seed 13
 ```
 
-- The first `data/blocks_4` is `dataset_dir` (where `trajectories_bin/` and `predicate_manifest_4.txt` are).
-- The second `data/blocks_4` is `dataset_split_dir` (where `train_files.txt` is).
-- `./output_ttm_N4_new` is the output directory for the model.
-
-This will train a TTM model and save its assets (weights, config) into `./output_ttm_N4_new/N4/final_model_assets/`.
+This will train a TTM model and save its assets (weights, config, logs) into `./training_outputs/ttm_N4/`.
+The final model specifically will be in a subdirectory like `final_model_assets/`.
 
 ### 3. Training a Model (Example: LSTM)
 
 (Assumes dataset for N=4 blocks has been generated and `data/blocks_4/train_files.txt` etc. exist)
 
-The LSTM script (`scripts/models/lstm.py`) directly uses the split files.
-
 ```bash
 # From the project root directory
-uv run python scripts/models/lstm.py \
-    data/blocks_4 \
-    data/blocks_4 \
-    ./output_lstm_N4 \
+uv run python scripts/train_model.py \
+    --model_type lstm \
+    --dataset_dir data/blocks_4 \
+    --dataset_split_dir data/blocks_4 \
     --num_blocks 4 \
-    --epochs 100 \
+    --output_dir ./training_outputs \
+    --epochs 200 \
     --batch_size 32 \
-    --lr 0.001
+    --learning_rate 0.001 \
+    # --lstm_hidden_size 128 \ # Optional
+    # --lstm_num_layers 2 \ # Optional
+    # --clip_grad_norm 1.0 \ # Optional
+    --seed 13
 ```
 
-- The first `data/blocks_4` is `dataset_dir` (where `trajectories_bin` is).
-- The second `data/blocks_4` is `dataset_split_dir` (where `train_files.txt` is).
-- `./output_lstm_N4` is the output directory for the model.
-  This will train an LSTM model and save it as `./output_lstm_N4/pats_lstm_model_N4.pth`.
-
-_(Note: The LSTM script's argument parsing might need slight adjustments to match this example if it was changed; the example above assumes it can take `num_blocks`, `epochs`, etc., as CLI args, and that the positional args are for dataset paths.)_
+This will train an LSTM model and save its checkpoint (`.pth`) into `./training_outputs/lstm_N4/`.
 
 ### 4. Benchmarking a Trained Model (Example: TTM for N=4)
 
@@ -95,7 +90,7 @@ uv run python scripts/benchmark.py \
     --dataset_dir ./data \
     --num_blocks 4 \
     --model_type ttm \
-    --model_path ./output_ttm_N4/final_model_assets \
+    --model_path ./training_outputs/ttm_N4/final_model_assets \
     --output_dir ./benchmark_results \
     --max_plan_length 60 \
     --save_detailed_results
@@ -109,7 +104,7 @@ uv run python scripts/benchmark.py \
     --dataset_dir ./data \
     --num_blocks 4 \
     --model_type lstm \
-    --model_path ./output_lstm_N4/pats_lstm_model_N4.pth \
+    --model_path ./training_outputs/lstm_N4/pats_lstm_model_N4.pth \
     --output_dir ./benchmark_results \
     --max_plan_length 60 \
     --save_detailed_results

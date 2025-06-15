@@ -40,6 +40,7 @@ The typical workflow for using PaTS is:
 - **`data/generate_dataset.sh`**: Automates the entire data generation pipeline from PDDL problem generation to encoded trajectories and predicate manifests.
 - **`data/parse_and_encode.py`**: Parses PDDL files (for initial/goal states) and VAL output logs (for state transitions), reconstructs state trajectories, encodes them into binary vectors based on a generated predicate order, and saves the binary data along with the crucial `predicate_manifest_<N>.txt` file.
 - **`data/analyze_dataset_splits.py`**: Analyzes the generated dataset for distributions and splits it into training, validation, and test sets, creating `*_files.txt`.
+- **`scripts/pats_dataset.py`**: Contains the `PaTSDataset` class, a unified PyTorch Dataset for loading pre-encoded binary trajectories and goal states from `.npy` files based on split file lists (e.g., `train_files.txt`).
 - **`scripts/BlocksWorldValidator.py`**:
   - Contains the `BlocksWorldValidator` class responsible for checking the physical validity of individual states and the legality of transitions between states in the Blocks World domain.
   - **Crucially, it is initialized with `num_blocks` and the path to the `predicate_manifest_<N>.txt` file.** This allows it to dynamically understand the structure of the binary state vectors it receives, making it robust to encoding changes.
@@ -52,8 +53,8 @@ The typical workflow for using PaTS is:
   - Passes the generated plan and goal state to an instance of `BlocksWorldValidator` (configured with the correct predicate manifest) for validation.
   - Collects detailed `ValidationResult` objects for each problem.
   - Computes and outputs aggregated performance metrics.
-- **`scripts/models/ttm.py`**: Implements training and prediction logic for the Tiny Time Mixer (TTM) model. It includes the `BlocksWorldDataset` for TTM-specific data loading (using `.npy` files, split files like `train_files.txt`, and the `predicate_manifest_<N>.txt`) and the `BlocksWorldTTM` class to manage the model. Its main focus is now on training and saving models.
-- **`scripts/models/lstm.py`**: Implements training and prediction logic for a baseline LSTM model. Its main focus is now on training and saving models.
+- **`scripts/models/ttm.py`**: Implements training and prediction logic for the Tiny Time Mixer (TTM) model. It uses `PaTSDataset` for data loading and a custom `TTMDataCollator` to prepare batches in the format TTM expects (including context/prediction windowing, padding, and scaling based on the `predicate_manifest_<N>.txt` for `state_dim`). Its main focus is now on training and saving models.
+- **`scripts/models/lstm.py`**: Implements training and prediction logic for a baseline LSTM model. It uses `PaTSDataset` for data loading and a custom `lstm_collate_fn` to prepare batches (padding sequences, etc.). Its main focus is now on training and saving models.
 - **`scripts/models/plansformer.py`**: (Placeholder) Intended for a Transformer-based planning model.
 
 ## Benchmarking and Evaluation (`scripts/benchmark.py`)

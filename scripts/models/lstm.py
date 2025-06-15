@@ -1,13 +1,15 @@
 import argparse
+import re
 from pathlib import Path  # For more robust path handling
+from typing import Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from helpers import get_num_blocks_from_filename
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, pad_sequence
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
+
+from ..pats_dataset import PaTSDataset
 
 # ** Configuration **
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -116,128 +118,60 @@ class PaTS_LSTM(nn.Module):
         return next_state_binary, next_state_probs, h_next, c_next
 
 
-class BWTrajectoryDataset(Dataset):
-    def __init__(self, problem_basenames, pats_dataset_dir: Path, target_num_blocks: int):
-        self.problem_basenames = []
-        self.trajectory_files = []
-        self.goal_files = []
-        self.num_features = None
-        self.target_num_blocks = target_num_blocks
-
-        print(f"Initializing dataset for {target_num_blocks} blocks.")
-        processed_count = 0
-        skipped_count = 0
-
-        for basename in problem_basenames:
-            num_blocks_in_file = get_num_blocks_from_filename(basename)
-            if num_blocks_in_file != self.target_num_blocks:
-                skipped_count += 1
-                continue  # Skip files not matching the target number of blocks
-
-            traj_path = pats_dataset_dir / "trajectories_bin" / f"{basename}.traj.bin.npy"
-            goal_path = pats_dataset_dir / "trajectories_bin" / f"{basename}.goal.bin.npy"
-
-            if not traj_path.exists() or not goal_path.exists():
-                # print(f"Warning: Data files not found for {basename}. Skipping.")
-                skipped_count += 1
-                continue
-
-            # Determine num_features from the first valid file
-            if self.num_features is None:
-                try:
-                    temp_traj_data = np.load(traj_path)
-                    if temp_traj_data.ndim == 2 and temp_traj_data.shape[0] > 0:
-                        self.num_features = temp_traj_data.shape[1]
-                        print(
-                            f"Determined num_features = {self.num_features} from {traj_path} for {self.target_num_blocks} blocks."
-                        )
-                    else:
-                        print(f"Warning: Trajectory file {traj_path} is empty or malformed. Skipping {basename}.")
-                        skipped_count += 1
-                        continue
-                except Exception as e:
-                    print(f"Error loading {traj_path} to determine num_features: {e}. Skipping {basename}.")
-                    skipped_count += 1
-                    continue
-
-            self.problem_basenames.append(basename)
-            self.trajectory_files.append(traj_path)
-            self.goal_files.append(goal_path)
-            processed_count += 1
-
-        print(
-            f"Dataset initialized: Loaded {processed_count} problems for {target_num_blocks} blocks. Skipped {skipped_count} problems."
-        )
-        if processed_count == 0 and len(problem_basenames) > 0:
-            print(f"Warning: No problems loaded for {target_num_blocks} blocks. Check paths and file names.")
-
-    def __len__(self):
-        return len(self.trajectory_files)
-
-    def __getitem__(self, idx):
-        traj_path = self.trajectory_files[idx]
-        goal_path = self.goal_files[idx]
-        basename = self.problem_basenames[idx]
-
-        try:
-            trajectory_np = np.load(traj_path)
-            goal_np = np.load(goal_path)
-        except Exception as e:
-            print(f"Error loading .npy files for {basename}: {e}. Returning None or dummy.")
-            # Handle error, e.g., by returning a dummy item or raising an error
-            # For now, let's try to skip by getting next item (simplistic)
-            return self.__getitem__((idx + 1) % len(self)) if len(self) > 0 else None
-
-        if trajectory_np.shape[0] < 1:  # Must have at least S0
-            print(f"Warning: Trajectory {traj_path} is empty. Skipping.")
-            return self.__getitem__((idx + 1) % len(self)) if len(self) > 0 else None
-
-        if trajectory_np.shape[0] == 1:  # S0 is goal
-            input_seq_np = trajectory_np  # S0
-            target_seq_np = trajectory_np  # S0
-        else:  # trajectory_np.shape[0] > 1
-            input_seq_np = trajectory_np[:-1, :]  # S_0 to S_{T-1}
-            target_seq_np = trajectory_np[1:, :]  # S_1 to S_T
-
-        return {
-            "input_sequence": torch.FloatTensor(input_seq_np),
-            "goal_state": torch.FloatTensor(goal_np),
-            "target_sequence": torch.FloatTensor(target_seq_np),
-            "expert_trajectory": torch.FloatTensor(trajectory_np),  # Full S_0 to S_T
-            "id": basename,
-        }
+def get_num_blocks_from_filename(filename_base: str) -> Optional[int]:
+    """Extracts number of blocks from a filename like 'blocks_3_problem_1'."""
+    match = re.search(r"blocks_(\d+)_problem", filename_base)
+    if match:
+        return int(match.group(1))
+    return None
 
 
-def collate_fn(batch):
+def lstm_collate_fn(batch):
     # Filter out None items that might result from __getitem__ errors
     batch = [item for item in batch if item is not None]
     if not batch:
         return None
 
-    input_seqs = [item["input_sequence"] for item in batch]
-    goal_states = torch.stack([item["goal_state"] for item in batch])
-    target_seqs = [item["target_sequence"] for item in batch]
-    expert_trajectories = [item["expert_trajectory"] for item in batch]  # For evaluation
-    ids = [item["id"] for item in batch]
+    input_seqs_list = []
+    target_seqs_list = []
+    goal_states_list = []
+    expert_trajectories_orig_list = []  # Store original expert trajectories
+    ids_list = []
 
-    lengths = torch.tensor([len(seq) for seq in input_seqs], dtype=torch.long)
+    for item in batch:
+        # item is a dict from PaTSDataset: {'initial_state', 'goal_state', 'expert_trajectory', 'id'}
+        # All values are np.float32 arrays.
+        expert_trajectory_np = item["expert_trajectory"]
+
+        if expert_trajectory_np.shape[0] == 1:  # S0 is goal or only S0 exists
+            input_s_np = expert_trajectory_np  # S0
+            target_s_np = expert_trajectory_np  # S0 (predict S0 from S0)
+        else:  # expert_trajectory_np.shape[0] > 1
+            input_s_np = expert_trajectory_np[:-1, :]  # S_0 to S_{T-1}
+            target_s_np = expert_trajectory_np[1:, :]  # S_1 to S_T
+
+        input_seqs_list.append(torch.from_numpy(input_s_np))
+        target_seqs_list.append(torch.from_numpy(target_s_np))
+        goal_states_list.append(torch.from_numpy(item["goal_state"]))
+        expert_trajectories_orig_list.append(torch.from_numpy(expert_trajectory_np))
+        ids_list.append(item["id"])
 
     # Pad sequences
     # pad_sequence expects a list of tensors (seq_len, features)
     # and returns (max_seq_len, batch_size, features) if batch_first=False (default)
     # or (batch_size, max_seq_len, features) if batch_first=True
-    padded_input_seqs = pad_sequence(input_seqs, batch_first=True, padding_value=0.0)
-    padded_target_seqs = pad_sequence(target_seqs, batch_first=True, padding_value=0.0)
-    # Expert trajectories are not directly fed to LSTM in this form, so padding them for convenience
-    # For evaluation, we typically process them one by one.
+    lengths = torch.tensor([len(seq) for seq in input_seqs_list], dtype=torch.long)
+    padded_input_seqs = pad_sequence(input_seqs_list, batch_first=True, padding_value=0.0)
+    padded_target_seqs = pad_sequence(target_seqs_list, batch_first=True, padding_value=0.0)
+    goal_states_batch = torch.stack(goal_states_list)
 
     return {
         "input_sequences": padded_input_seqs,
-        "goal_states": goal_states,
+        "goal_states": goal_states_batch,
         "target_sequences": padded_target_seqs,
         "lengths": lengths,
-        "ids": ids,
-        "expert_trajectories": expert_trajectories,  # List of tensors
+        "ids": ids_list,
+        "expert_trajectories": expert_trajectories_orig_list,  # List of original trajectory tensors
     }
 
 
@@ -379,6 +313,10 @@ if __name__ == "__main__":
     parser.add_argument("dataset_dir", type=str, help="Path to the dataset directory")
     parser.add_argument("dataset_split", type=str, help="Path to the dataset split files")
     parser.add_argument("output_dir", type=str, help="Path to the output directory")
+    parser.add_argument("--num_blocks", type=int, required=True, help="Number of blocks for this training run.")
+    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate.")
+    parser.add_argument("--epochs", type=int, default=250, help="Number of training epochs.")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size.")
     args = parser.parse_args()
 
     # ** Paths **
@@ -390,57 +328,60 @@ if __name__ == "__main__":
     LSTM_OUTPUT_DIR = Path(args.output_dir)
     LSTM_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # TARGET_NUM_BLOCKS is taken from CLI if provided, or inferred if possible.
+    # For simplicity, this script will rely on dataset_dir being for a specific N.
+    # The num_blocks argument to the script is crucial.
+    cli_num_blocks = getattr(args, "num_blocks", None)  # Check if num_blocks is passed
+    if cli_num_blocks is None:
+        print("Error: --num_blocks argument is required for LSTM training.")
+        exit(1)
+    TARGET_NUM_BLOCKS = cli_num_blocks
+    print(f"**** Script configured for TARGET_NUM_BLOCKS = {TARGET_NUM_BLOCKS} ****")
+
     # Parameters
-    # The script will filter data from split files for this specific N.
-    # A separate model will be trained for each N.
-    TARGET_NUM_BLOCKS = 4
-    NUM_FEATURES_FOR_N_BLOCKS = 25
     HIDDEN_SIZE = 128
     NUM_LSTM_LAYERS = 2
     DROPOUT_PROB = 0.2
-    LEARNING_RATE = 0.001
-    NUM_EPOCHS = 250
-    BATCH_SIZE = 32
-
-    print(f"**** Script configured for TARGET_NUM_BLOCKS = {TARGET_NUM_BLOCKS} ****")
+    LEARNING_RATE = getattr(args, "lr", 0.001)
+    NUM_EPOCHS = getattr(args, "epochs", 250)
+    BATCH_SIZE = getattr(args, "batch_size", 32)
+    # NUM_FEATURES_FOR_N_BLOCKS will be inferred by PaTSDataset
 
     MODEL_SAVE_PATH = LSTM_OUTPUT_DIR / f"pats_lstm_model_N{TARGET_NUM_BLOCKS}.pth"
     RESULTS_SAVE_PATH = LSTM_OUTPUT_DIR / f"test_results_N{TARGET_NUM_BLOCKS}.json"
 
     # ** 1. Data Preparation using split files **
-    train_basenames_all = load_problem_basenames(DATA_ANALYZED_DIR / "train_files.txt")
-    val_basenames_all = load_problem_basenames(DATA_ANALYZED_DIR / "val_files.txt")
-    test_basenames_all = load_problem_basenames(DATA_ANALYZED_DIR / "test_files.txt")
+    # PaTSDataset takes dataset_dir (e.g. data/blocks_4) and split_file_name (e.g. train_files.txt)
+    try:
+        train_dataset = PaTSDataset(dataset_dir=PATS_DATASET_DIR, split_file_name="train_files.txt")
+        val_dataset = PaTSDataset(dataset_dir=PATS_DATASET_DIR, split_file_name="val_files.txt")
+        # Test dataset can be loaded if needed for an evaluation step within this script
+        # test_dataset = PaTSDataset(dataset_dir=PATS_DATASET_DIR, split_file_name="test_files.txt")
+    except Exception as e:
+        print(f"Error initializing PaTSDataset: {e}")
+        exit(1)
 
-    if not train_basenames_all:
-        print("No training files loaded. Exiting.")
-        exit()
-
-    # Create datasets filtered for TARGET_NUM_BLOCKS
-    # The dataset class itself will handle filtering and determine num_features
-    train_dataset = BWTrajectoryDataset(train_basenames_all, PATS_DATASET_DIR, TARGET_NUM_BLOCKS)
-
-    # Ensure num_features was set (i.e., at least one valid problem was found)
-    if train_dataset.num_features is None:
+    if train_dataset.state_dim is None or train_dataset.state_dim <= 0:  # state_dim is inferred by PaTSDataset
         print(
             f"Could not determine num_features for {TARGET_NUM_BLOCKS} blocks from training data. "
             "Ensure train_files.txt contains valid problems for this N and files exist."
         )
         exit()
 
-    ACTUAL_NUM_FEATURES = train_dataset.num_features
-    print(f"Using ACTUAL_NUM_FEATURES = {ACTUAL_NUM_FEATURES} for N={TARGET_NUM_BLOCKS}")
-
-    val_dataset = BWTrajectoryDataset(val_basenames_all, PATS_DATASET_DIR, TARGET_NUM_BLOCKS)
-    test_dataset = BWTrajectoryDataset(test_basenames_all, PATS_DATASET_DIR, TARGET_NUM_BLOCKS)
+    ACTUAL_NUM_FEATURES = train_dataset.state_dim
+    print(f"Using ACTUAL_NUM_FEATURES = {ACTUAL_NUM_FEATURES} (inferred) for N={TARGET_NUM_BLOCKS}")
 
     if len(train_dataset) == 0:
         print(f"No training data loaded for N={TARGET_NUM_BLOCKS}. Check dataset paths and split files. Exiting.")
         exit()
 
-    train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=0)
-    val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0)
-    test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0)
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=lstm_collate_fn, num_workers=0
+    )
+    val_dataloader = DataLoader(
+        val_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=lstm_collate_fn, num_workers=0
+    )
+    # test_dataloader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=lstm_collate_fn, num_workers=0)
 
     # ** 2. Model Initialization **
     model = PaTS_LSTM(ACTUAL_NUM_FEATURES, HIDDEN_SIZE, NUM_LSTM_LAYERS, DROPOUT_PROB).to(DEVICE)

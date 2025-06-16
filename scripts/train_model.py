@@ -1,3 +1,15 @@
+import sys
+from pathlib import Path
+
+# 1. <.parent> contains this train_model.py
+# 2. <.parent.parent> contains scripts/
+# 3. <.parent.parent.parent> contains PaTS project
+# 4. <.parent.parent.parent.parent> for good measure
+sys.path.append(str(Path(__file__).parent))
+sys.path.append(str(Path(__file__).parent.parent))
+sys.path.append(str(Path(__file__).parent.parent.parent))
+sys.path.append(str(Path(__file__).parent.parent.parent.parent))
+
 import argparse
 import sys
 from datetime import datetime
@@ -16,6 +28,8 @@ from scripts.models.ttm import setup_logging as ttm_setup_logging
 from scripts.pats_dataset import PaTSDataset
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
+print(DEVICE)
+exit()
 
 
 def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, model_save_path):

@@ -50,10 +50,10 @@ uv run python scripts/train_model.py \
     --num_epochs 100 \
     --batch_size 32 \
     --learning_rate 1e-4 \
+    --seed 13
     # --ttm_model_path "ibm-granite/granite-timeseries-ttm-r2" # Optional: specify base TTM model
     # --context_length 60 \ # Optional: TTM can auto-determine this if not provided
     # --prediction_length 60 \ # Optional: TTM can auto-determine this if not provided
-    --seed 13
 ```
 
 This will train a TTM model and save its assets (weights, config, logs) into `./training_outputs/ttm_N4/`.

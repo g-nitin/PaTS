@@ -2,15 +2,24 @@
 dependencies = [
   "hf-xet>=1.1.2",
   "loguru>=0.7.3",
+  "matplotlib>=3.10.3",
   "numpy==2.2.1",
+  "pandas>=2.3.0",
   "pddlpy>=0.4.4",
+  "scipy>=1.15.3",
+  "seaborn>=0.13.2",
+  "tensorboard>=2.19.0",
   "torch==2.2.1; sys_platform == 'darwin'",
+  "transformers>=4.52.4",
 ]
 description = "Planning as Time-Series"
 name = "PaTS"
 readme = "README.md"
 requires-python = ">=3.12"
 version = "0.1.0"
+
+# Notes:
+# `pip install -e .` to install manually install to env (conda, etc.) with pip.
 # Might need to run `uv pip install "granite-tsfm[notebooks] @ git+https://github.com/ibm-granite/granite-tsfm.git@v0.2.22"`
 
 [dependency-groups]

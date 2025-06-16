@@ -6,3 +6,6 @@ data/blocks_*/
 
 outputs/
 own/
+
+PaTS.egg-info/
+build/

@@ -109,6 +109,7 @@ class TTMDataCollator:
         list_future_observed_mask = []
         list_static_categorical_scaled = []
 
+        # print(batch_items)
         for item in batch_items:
             plan_states_np_orig = item["expert_trajectory"]  # (L, F), 0/1
             goal_state_np_orig = item["goal_state"]  # (F,), 0/1
@@ -228,6 +229,7 @@ class BlocksWorldTTM:
             logging_strategy="steps",
             logging_steps=10,  # Log every 10 steps
             dataloader_pin_memory=False,
+            remove_unused_columns=False,  # Do not remove unused columns
         )
 
         # Callbacks

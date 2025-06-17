@@ -226,7 +226,7 @@ class BlocksWorldValidator:
                 Violation(
                     "TRANS_ILLEGAL_CHANGES",
                     f"Illegal number of changes ({differences} bits changed). Expected 4 or 5 for a single action.",
-                    {"diff_count": differences},
+                    {"diff_count": int(differences)},
                 )
             )
 

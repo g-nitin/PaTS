@@ -41,13 +41,13 @@ After generation, `data/blocks_<N>/` will contain the PDDL files, plans, VAL log
 
 ```bash
 # From the project root directory
-uv run python scripts/train_model.py \
+uv run python -m scripts.train_model \
     --model_type ttm \
     --dataset_dir data/blocks_4 \
     --dataset_split_dir data/blocks_4 \
     --num_blocks 4 \
     --output_dir ./training_outputs \
-    --num_epochs 100 \
+    --epochs 100 \
     --batch_size 32 \
     --learning_rate 1e-4 \
     --seed 13
@@ -65,7 +65,7 @@ The final model specifically will be in a subdirectory like `final_model_assets/
 
 ```bash
 # From the project root directory
-uv run python scripts/train_model.py \
+uv run python -m scripts.train_model \
     --model_type lstm \
     --dataset_dir data/blocks_4 \
     --dataset_split_dir data/blocks_4 \
@@ -74,10 +74,10 @@ uv run python scripts/train_model.py \
     --epochs 200 \
     --batch_size 32 \
     --learning_rate 0.001 \
+    --seed 13
     # --lstm_hidden_size 128 \ # Optional
     # --lstm_num_layers 2 \ # Optional
     # --clip_grad_norm 1.0 \ # Optional
-    --seed 13
 ```
 
 This will train an LSTM model and save its checkpoint (`.pth`) into `./training_outputs/lstm_N4/`.
@@ -86,7 +86,7 @@ This will train an LSTM model and save its checkpoint (`.pth`) into `./training_
 
 ```bash
 # From the project root directory
-uv run python scripts/benchmark.py \
+uv run python -m scripts.benchmark \
     --dataset_dir ./data \
     --num_blocks 4 \
     --model_type ttm \
@@ -100,7 +100,7 @@ uv run python scripts/benchmark.py \
 
 ```bash
 # From the project root directory
-uv run python scripts/benchmark.py \
+uv run python -m scripts.benchmark \
     --dataset_dir ./data \
     --num_blocks 4 \
     --model_type lstm \

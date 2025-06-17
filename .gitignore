@@ -3,9 +3,13 @@
 .vscode/
 
 data/blocks_*/
+data/*.zip
 
 outputs/
 own/
 
 PaTS.egg-info/
 build/
+
+training_outputs/*
+benchmark_results/*

@@ -7,10 +7,10 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-from BlocksWorldValidator import BlocksWorldValidator, ValidationResult
-from models.lstm import PaTS_LSTM
-from models.ttm import BlocksWorldTTM
-from models.ttm import ModelConfig as TTMModelConfig
+from .BlocksWorldValidator import BlocksWorldValidator, ValidationResult
+from .models.lstm import PaTS_LSTM
+from .models.ttm import BlocksWorldTTM
+from .models.ttm import ModelConfig as TTMModelConfig
 
 # Setup device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))

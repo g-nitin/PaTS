@@ -16,16 +16,16 @@ The typical workflow for using PaTS is:
 
       ```bash
       # For TTM
-      uv run python scripts/train_model.py \
+      uv run python -m scripts.train_model \
           --model_type ttm \
           --dataset_dir data/blocks_4 \
           --dataset_split_dir data/blocks_4 \
           --num_blocks 4 \
           --output_dir ./training_outputs \
-          --num_epochs 100
+          --epochs 100
 
       # For LSTM
-      uv run python scripts/train_model.py \
+      uv run python -m scripts.train_model \
           --model_type lstm \
           --dataset_dir data/blocks_4 \
           --dataset_split_dir data/blocks_4 \

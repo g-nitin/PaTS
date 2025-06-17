@@ -1,20 +1,9 @@
-import sys
-from pathlib import Path
-
-# 1. <.parent> contains this train_model.py
-# 2. <.parent.parent> contains scripts/
-# 3. <.parent.parent.parent> contains PaTS project
-# 4. <.parent.parent.parent.parent> for good measure
-sys.path.append(str(Path(__file__).parent))
-sys.path.append(str(Path(__file__).parent.parent))
-sys.path.append(str(Path(__file__).parent.parent.parent))
-sys.path.append(str(Path(__file__).parent.parent.parent.parent))
-
 import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -28,8 +17,6 @@ from scripts.models.ttm import setup_logging as ttm_setup_logging
 from scripts.pats_dataset import PaTSDataset
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
-print(DEVICE)
-exit()
 
 
 def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, model_save_path):
@@ -270,9 +257,9 @@ def main():
                 if traj_file_path_for_len.exists():
                     try:
                         traj_np = (
-                            torch.load(traj_file_path_for_len)
+                            torch.load(traj_file_path_for_len, weights_only=False)
                             if traj_file_path_for_len.suffix == ".pt"
-                            else torch.from_numpy(torch.load(traj_file_path_for_len))
+                            else torch.from_numpy(np.load(traj_file_path_for_len))
                             if traj_file_path_for_len.suffix == ".npy"
                             else None
                         )  # Adjusted for potential .npy loading

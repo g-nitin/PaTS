@@ -6,6 +6,7 @@ dependencies = [
   "numpy==2.2.1",
   "pandas>=2.3.0",
   "pddlpy>=0.4.4",
+  "pyyaml>=6.0.2",
   "scipy>=1.15.3",
   "seaborn>=0.13.2",
   "tensorboard>=2.19.0",
@@ -18,9 +19,14 @@ readme = "README.md"
 requires-python = ">=3.12"
 version = "0.1.0"
 
-# Notes:
-# `pip install -e .` to install manually install to env (conda, etc.) with pip.
-# Might need to run `uv pip install "granite-tsfm[notebooks] @ git+https://github.com/ibm-granite/granite-tsfm.git@v0.2.22"`
+[tool.setuptools]
+py-modules = []
+
+# Steps:
+# 1. Activate conda environment first (conda activate pats-env)
+# 2. `pip install -e .`: Install manually install to env (conda, etc.) with pip.
+# 3. `uv pip install "granite-tsfm[notebooks] @ git+https://github.com/ibm-granite/granite-tsfm.git@v0.2.22"`
+# 4. Conda deactivate
 
 [dependency-groups]
 dev = [

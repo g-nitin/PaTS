@@ -37,7 +37,6 @@ elif torch.cuda.is_available():
 else:
     DEVICE = torch.device("cpu")
 # DEVICE = torch.device("cpu")
-logger.info(f"Using device: {DEVICE}")
 
 
 # ** Data Classes **

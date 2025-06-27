@@ -74,7 +74,10 @@ uv run python -m scripts.train_model \
     --epochs 200 \
     --batch_size 32 \
     --learning_rate 0.001 \
-    --seed 13
+    --seed 13 \
+    --use_mlm_task \  #  Enables the auxiliary masking task
+    --mlm_loss_weight 0.2 \  # Controls the influence of the MLM loss (e.g., 0.2 means Total Loss = L_forecast + 0.2 * L_mlm).
+    --mlm_mask_prob 0.15  # The probability that any given predicate in the input sequence will be chosen for the MLM loss calculation.
     # --lstm_hidden_size 128 \ # Optional
     # --lstm_num_layers 2 \ # Optional
     # --clip_grad_norm 1.0 \ # Optional

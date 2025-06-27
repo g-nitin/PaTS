@@ -28,6 +28,7 @@ model_path="${output_dir}/${model_type}_N${num_blocks}/pats_${model_type}_model_
 
 echo -e "\n"
 echo "Starting training with model: $model_type"
+echo "Using masking"
 python -m scripts.train_model \
     --model_type $model_type \
     --dataset_dir data/blocks_4 \
@@ -37,7 +38,10 @@ python -m scripts.train_model \
     --epochs 400 \
     --batch_size 32 \
     --learning_rate 0.001 \
-    --seed 13
+    --seed 13 \
+    --use_mlm_task \
+    --mlm_loss_weight 0.2 \
+    --mlm_mask_prob 0.15
 
 echo -e "\n"
 echo "Training completed. Outputs in $output_dir"

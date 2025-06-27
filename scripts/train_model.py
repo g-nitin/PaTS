@@ -1,6 +1,7 @@
 import argparse
 import sys
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -24,52 +25,67 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
     # Ensure criterion is defined here or passed if it's specific
     criterion = nn.BCEWithLogitsLoss(reduction="none")
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
-    # Increased patience, added verbose
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=10, factor=0.5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=10, factor=0.5, verbose=True)
 
     best_val_loss = float("inf")
 
     for epoch in range(args.epochs):
         model.train()
-        epoch_train_loss = 0.0
+        epoch_train_loss, epoch_forecast_loss, epoch_mlm_loss = 0.0, 0.0, 0.0
         num_train_batches = 0
 
-        for batch_idx, batch_data in enumerate(train_loader):
+        for batch_data in train_loader:
             if batch_data is None:
                 continue
             input_seqs = batch_data["input_sequences"].to(DEVICE)
             goal_states = batch_data["goal_states"].to(DEVICE)
             target_seqs = batch_data["target_sequences"].to(DEVICE)
-            lengths = batch_data["lengths"]  # Keep on CPU for pack_padded_sequence
+            lengths = batch_data["lengths"]
+            mlm_predicate_mask = batch_data["mlm_predicate_mask"].to(DEVICE)
 
             optimizer.zero_grad()
-            output_logits, _ = model(input_seqs, goal_states, lengths)  # Pass lengths
+            forecasting_logits, mlm_logits, _ = model(input_seqs, goal_states, lengths)
 
-            mask = torch.zeros_like(target_seqs, dtype=torch.bool).to(DEVICE)
-            for i, length_val in enumerate(lengths):  # Renamed length to length_val to avoid conflict
+            # Calculate Forecasting Loss (Primary Task)
+            forecasting_mask = torch.zeros_like(target_seqs, dtype=torch.bool).to(DEVICE)
+            for i, length_val in enumerate(lengths):
                 if length_val > 0:
-                    mask[i, :length_val, :] = True
+                    forecasting_mask[i, :length_val, :] = True
 
-            if mask.float().sum() == 0:
-                # print(f"Warning: Empty mask in training batch {batch_idx}. Skipping.")
+            num_forecast_elements = forecasting_mask.float().sum()
+            if num_forecast_elements == 0:
                 continue
 
-            loss_unreduced = criterion(output_logits, target_seqs)
-            loss = (loss_unreduced * mask.float()).sum() / mask.float().sum()
+            loss_forecasting_unreduced = criterion(forecasting_logits, target_seqs)
+            loss_forecasting = (loss_forecasting_unreduced * forecasting_mask.float()).sum() / num_forecast_elements
 
-            loss.backward()
-            if args.clip_grad_norm is not None and args.clip_grad_norm > 0:  # Check if > 0
+            # Calculate MLM Loss (Auxiliary Task)
+            loss_mlm = torch.tensor(0.0).to(DEVICE)
+            if args.use_mlm_task and mlm_logits is not None:
+                num_masked_elements = mlm_predicate_mask.sum()
+                if num_masked_elements > 0:
+                    loss_mlm_unreduced = criterion(mlm_logits, input_seqs)
+                    loss_mlm = (loss_mlm_unreduced * mlm_predicate_mask).sum() / num_masked_elements
+
+            # Total Loss
+            total_loss = loss_forecasting + args.mlm_loss_weight * loss_mlm
+            total_loss.backward()
+            if args.clip_grad_norm is not None and args.clip_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
             optimizer.step()
 
-            epoch_train_loss += loss.item()
+            epoch_train_loss += total_loss.item()
+            epoch_forecast_loss += loss_forecasting.item()
+            epoch_mlm_loss += loss_mlm.item()
             num_train_batches += 1
 
-        avg_epoch_train_loss = epoch_train_loss / num_train_batches if num_train_batches > 0 else float("inf")
+        avg_train_loss = epoch_train_loss / num_train_batches if num_train_batches > 0 else float("inf")
+        avg_forecast_loss = epoch_forecast_loss / num_train_batches if num_train_batches > 0 else float("inf")
+        avg_mlm_loss = epoch_mlm_loss / num_train_batches if num_train_batches > 0 else float("inf")
 
         # Validation
         model.eval()
-        epoch_val_loss = 0.0
+        epoch_val_loss, epoch_val_forecast_loss, epoch_val_mlm_loss = 0.0, 0.0, 0.0
         num_val_batches = 0
         with torch.no_grad():
             for batch_data in val_loader:
@@ -78,31 +94,46 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
                 input_seqs = batch_data["input_sequences"].to(DEVICE)
                 goal_states = batch_data["goal_states"].to(DEVICE)
                 target_seqs = batch_data["target_sequences"].to(DEVICE)
-                lengths = batch_data["lengths"]  # Keep on CPU
+                lengths = batch_data["lengths"]
+                mlm_predicate_mask = batch_data["mlm_predicate_mask"].to(DEVICE)
 
-                output_logits, _ = model(input_seqs, goal_states, lengths)  # Pass lengths
-                mask = torch.zeros_like(target_seqs, dtype=torch.bool).to(DEVICE)
-                for i, length_val in enumerate(lengths):  # Renamed length to length_val
+                forecasting_logits, mlm_logits, _ = model(input_seqs, goal_states, lengths)
+
+                forecasting_mask = torch.zeros_like(target_seqs, dtype=torch.bool).to(DEVICE)
+                for i, length_val in enumerate(lengths):
                     if length_val > 0:
-                        mask[i, :length_val, :] = True
+                        forecasting_mask[i, :length_val, :] = True
 
-                if mask.float().sum() == 0:
-                    # print(f"Warning: Empty mask in validation batch. Skipping.") # Optional
+                num_forecast_elements = forecasting_mask.float().sum()
+                if num_forecast_elements == 0:
                     continue
-                loss_unreduced = criterion(output_logits, target_seqs)
-                loss = (loss_unreduced * mask.float()).sum() / mask.float().sum()
-                epoch_val_loss += loss.item()
+
+                loss_forecasting = (
+                    criterion(forecasting_logits, target_seqs) * forecasting_mask.float()
+                ).sum() / num_forecast_elements
+                loss_mlm = torch.tensor(0.0).to(DEVICE)
+                if args.use_mlm_task and mlm_logits is not None:
+                    num_masked_elements = mlm_predicate_mask.sum()
+                    if num_masked_elements > 0:
+                        loss_mlm = (criterion(mlm_logits, input_seqs) * mlm_predicate_mask).sum() / num_masked_elements
+
+                total_loss = loss_forecasting + args.mlm_loss_weight * loss_mlm
+                epoch_val_loss += total_loss.item()
+                epoch_val_forecast_loss += loss_forecasting.item()
+                epoch_val_mlm_loss += loss_mlm.item()
                 num_val_batches += 1
 
-        avg_epoch_val_loss = epoch_val_loss / num_val_batches if num_val_batches > 0 else float("inf")
-        scheduler.step(avg_epoch_val_loss)  # Step scheduler with validation loss
+        avg_val_loss = epoch_val_loss / num_val_batches if num_val_batches > 0 else float("inf")
+        avg_val_forecast_loss = epoch_val_forecast_loss / num_val_batches if num_val_batches > 0 else float("inf")
+        avg_val_mlm_loss = epoch_val_mlm_loss / num_val_batches if num_val_batches > 0 else float("inf")
+        scheduler.step(avg_val_loss)
 
-        print(
-            f"Epoch [{epoch + 1}/{args.epochs}] Train Loss: {avg_epoch_train_loss:.4f}, Val Loss: {avg_epoch_val_loss:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}"
-        )
+        train_loss_str = f"Train Loss: {avg_train_loss:.4f} (F: {avg_forecast_loss:.4f}, M: {avg_mlm_loss:.4f})"
+        val_loss_str = f"Val Loss: {avg_val_loss:.4f} (F: {avg_val_forecast_loss:.4f}, M: {avg_val_mlm_loss:.4f})"
+        print(f"Epoch [{epoch + 1}/{args.epochs}] {train_loss_str}, {val_loss_str}")
 
-        if avg_epoch_val_loss < best_val_loss:
-            best_val_loss = avg_epoch_val_loss
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
             torch.save(
                 {
                     "epoch": epoch,
@@ -113,6 +144,8 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
                     "hidden_size": args.lstm_hidden_size,
                     "num_lstm_layers": args.lstm_num_layers,
                     "dropout_prob": args.lstm_dropout_prob,
+                    "use_mlm_task": args.use_mlm_task,
+                    "mlm_loss_weight": args.mlm_loss_weight,
                     "target_num_blocks": args.num_blocks,
                 },
                 model_save_path,
@@ -154,6 +187,11 @@ def main():
         type=float,
         default=1.0,
         help="Gradient clipping norm for LSTM (0 to disable). TTM handles internally.",
+    )
+    parser.add_argument("--use_mlm_task", action="store_true", help="Enable MLM auxiliary task for LSTM.")
+    parser.add_argument("--mlm_loss_weight", type=float, default=0.2, help="Weight for the MLM auxiliary loss.")
+    parser.add_argument(
+        "--mlm_mask_prob", type=float, default=0.15, help="Probability of masking a predicate for the MLM task."
     )
 
     # TTM specific arguments
@@ -220,12 +258,16 @@ def main():
         )
 
     if args.model_type == "lstm":
+        # Use partial to create a collate function with the mlm_mask_prob argument
+        collate_fn_with_args = partial(lstm_collate_fn, mlm_mask_prob=args.mlm_mask_prob if args.use_mlm_task else 0.0)
+
         train_dataloader = DataLoader(
-            train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=lstm_collate_fn, num_workers=0
+            train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn_with_args, num_workers=0
         )
-        # Handle empty val_dataset for val_dataloader
         val_dataloader = (
-            DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=lstm_collate_fn, num_workers=0)
+            DataLoader(
+                val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn_with_args, num_workers=0
+            )
             if len(val_dataset) > 0
             else None
         )
@@ -235,8 +277,9 @@ def main():
             hidden_size=args.lstm_hidden_size,
             num_lstm_layers=args.lstm_num_layers,
             dropout_prob=args.lstm_dropout_prob,
+            use_mlm_task=args.use_mlm_task,  # Pass the flag
         ).to(DEVICE)
-        setattr(model, "target_num_blocks", args.num_blocks)  # Store for reference in saved checkpoint
+        setattr(model, "target_num_blocks", args.num_blocks)
         print(model)
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Total trainable LSTM parameters: {total_params}")
@@ -256,13 +299,7 @@ def main():
                 traj_file_path_for_len = args.dataset_dir / "trajectories_bin" / f"{basename_for_len_check}.traj.bin.npy"
                 if traj_file_path_for_len.exists():
                     try:
-                        traj_np = (
-                            torch.load(traj_file_path_for_len, weights_only=False)
-                            if traj_file_path_for_len.suffix == ".pt"
-                            else torch.from_numpy(np.load(traj_file_path_for_len))
-                            if traj_file_path_for_len.suffix == ".npy"
-                            else None
-                        )  # Adjusted for potential .npy loading
+                        traj_np = torch.from_numpy(np.load(traj_file_path_for_len))
                         if traj_np is not None and traj_np.ndim == 2:
                             max_plan_len_in_train_data = max(max_plan_len_in_train_data, traj_np.shape[0])
                     except Exception as e:

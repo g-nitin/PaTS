@@ -8,7 +8,21 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.b
 
 # ** Model Definition **
 class PaTS_LSTM(nn.Module):
-    def __init__(self, num_features, hidden_size, num_lstm_layers, dropout_prob=0.2):
+    def __init__(self, num_features, hidden_size, num_lstm_layers, dropout_prob=0.2, use_mlm_task=False):
+        """
+        Initializes the PaTS_LSTM model.
+
+        :param num_features: The number of features in a state vector.
+        :type num_features: int
+        :param hidden_size: The size of the LSTM hidden state.
+        :type hidden_size: int
+        :param num_lstm_layers: The number of layers in the LSTM.
+        :type num_lstm_layers: int
+        :param dropout_prob: Dropout probability.
+        :type dropout_prob: float
+        :param use_mlm_task: If True, adds an auxiliary MLM head.
+        :type use_mlm_task: bool
+        """
         super(PaTS_LSTM, self).__init__()
         self.num_features = num_features  # F
         self.hidden_size = hidden_size  # H
@@ -23,21 +37,32 @@ class PaTS_LSTM(nn.Module):
             dropout=dropout_prob if num_lstm_layers > 1 else 0.0,
         )
 
-        self.fc_out = nn.Linear(hidden_size, num_features)
-        # BCEWithLogitsLoss will handle the sigmoid for training
+        # Prediction Heads
+        # Primary head for next-state forecasting
+        self.forecasting_head = nn.Linear(hidden_size, num_features)
+
+        # Auxiliary head for Masked Language Modeling (state reconstruction)
+        if self.use_mlm_task:
+            self.mlm_head = nn.Linear(hidden_size, num_features)
 
     def forward(self, current_states_batch, goal_state_batch, lengths, h_init=None, c_init=None):
         """
         Forward pass for training or multi-step inference.
-        Args:
-            current_states_batch (Tensor): Batch of current state sequences (B, S_max, F). Padded sequences.
-            goal_state_batch (Tensor): Batch of goal states (B, F).
-            lengths (Tensor): Batch of original sequence lengths (B,). For packing.
-            h_init (Tensor, optional): Initial hidden state.
-            c_init (Tensor, optional): Initial cell state.
-        Returns:
-            output_logits (Tensor): Logits for predicted next states (B, S_max, F).
-            (h_n, c_n) (tuple): Last hidden and cell states.
+        :param current_states_batch: Batch of current state sequences (B, S_max, F). Padded sequences.
+        :type current_states_batch: Tensor
+        :param goal_state_batch: Batch of goal states (B, F).
+        :type goal_state_batch: Tensor
+        :param lengths: Batch of original sequence lengths (B,). For packing.
+        :type lengths: Tensor
+        :param h_init: Initial hidden state.
+        :type h_init: Tensor | None
+        :param c_init: Initial cell state.
+        :type c_init: Tensor | None
+        :returns:
+            - forecasting_logits: Logits for predicted next states (B, S_max, F).
+            - mlm_logits: Logits for MLM state reconstruction. None if use_mlm_task is False.
+            - (h_n, c_n): Last hidden and cell states.
+        :rtype: Tuple[Tensor, Tensor | None, Tuple[Tensor, Tensor]]
         """
         batch_size, max_seq_len, _ = current_states_batch.shape
 
@@ -66,26 +91,34 @@ class PaTS_LSTM(nn.Module):
 
         # Unpack sequence
         lstm_out, _ = pad_packed_sequence(packed_output, batch_first=True, total_length=max_seq_len)
-        # lstm_out: (B, S_max, H)
 
-        # Pass LSTM output through the fully connected layer
-        # output_logits: (B, S_max, F)
-        output_logits = self.fc_out(lstm_out)
+        # Primary Task: Forecasting Head
+        forecasting_logits = self.forecasting_head(lstm_out)
 
-        return output_logits, (h_n, c_n)
+        # Auxiliary Task: MLM Head
+        mlm_logits = None
+        if self.use_mlm_task:
+            # The MLM head uses the same shared representation to reconstruct the input sequence.
+            mlm_logits = self.mlm_head(lstm_out)
+
+        return forecasting_logits, mlm_logits, (h_n, c_n)
 
     def predict_step(self, current_state_S_t, goal_state_S_G, h_prev, c_prev):
         """
         Predicts the single next state for inference.
-        Args:
-            current_state_S_t (Tensor): Current state (1, F).
-            goal_state_S_G (Tensor): Goal state (1, F).
-            h_prev (Tensor): Previous hidden state from LSTM.
-            c_prev (Tensor): Previous cell state from LSTM.
-        Returns:
-            next_state_binary (Tensor): Predicted binary next state (1, F).
-            next_state_probs (Tensor): Predicted probabilities for next state (1, F).
-            (h_next, c_next) (tuple): New hidden and cell states.
+        :param current_state_S_t: Current state (1, F).
+        :type current_state_S_t: Tensor
+        :param goal_state_S_G: Goal state (1, F).
+        :type goal_state_S_G: Tensor
+        :param h_prev: Previous hidden state from LSTM.
+        :type h_prev: Tensor
+        :param c_prev: Previous cell state from LSTM.
+        :type c_prev: Tensor
+        :returns:
+            - next_state_binary: Predicted binary next state (1, F).
+            - next_state_probs: Predicted probabilities for next state (1, F).
+            - (h_next, c_next): New hidden and cell states.
+        :rtype: Tuple[Tensor, Tensor, Tuple[Tensor, Tensor]]
         """
         self.eval()  # Set to evaluation mode
 
@@ -99,7 +132,8 @@ class PaTS_LSTM(nn.Module):
         lstm_out, (h_next, c_next) = self.lstm(lstm_input_step, (h_prev, c_prev))
         # lstm_out: (1, 1, H)
 
-        next_state_logits = self.fc_out(lstm_out.squeeze(1))  # (1, H) -> (1, F)
+        # Use the forecasting head for prediction
+        next_state_logits = self.forecasting_head(lstm_out.squeeze(1))
         next_state_probs = torch.sigmoid(next_state_logits)
 
         # Convert probabilities to binary state (e.g., thresholding)
@@ -108,29 +142,29 @@ class PaTS_LSTM(nn.Module):
         return next_state_binary, next_state_probs, h_next, c_next
 
 
-def lstm_collate_fn(batch):
+def lstm_collate_fn(batch, mlm_mask_prob=0.15):
+    """
+    Custom collate function for LSTM training.
+    Handles padding and prepares data for the MLM auxiliary task.
+    """
     # Filter out None items that might result from __getitem__ errors
     batch = [item for item in batch if item is not None]
     if not batch:
         return None
 
-    input_seqs_list = []
-    target_seqs_list = []
-    goal_states_list = []
-    expert_trajectories_orig_list = []  # Store original expert trajectories
-    ids_list = []
+    input_seqs_list, target_seqs_list, goal_states_list, expert_trajectories_orig_list, ids_list = [], [], [], [], []
 
     for item in batch:
         # item is a dict from PaTSDataset: {'initial_state', 'goal_state', 'expert_trajectory', 'id'}
         # All values are np.float32 arrays.
         expert_trajectory_np = item["expert_trajectory"]
 
-        if expert_trajectory_np.shape[0] == 1:  # S0 is goal or only S0 exists
-            input_s_np = expert_trajectory_np  # S0
-            target_s_np = expert_trajectory_np  # S0 (predict S0 from S0)
-        else:  # expert_trajectory_np.shape[0] > 1
-            input_s_np = expert_trajectory_np[:-1, :]  # S_0 to S_{T-1}
-            target_s_np = expert_trajectory_np[1:, :]  # S_1 to S_T
+        if expert_trajectory_np.shape[0] <= 1:
+            input_s_np = expert_trajectory_np
+            target_s_np = expert_trajectory_np
+        else:
+            input_s_np = expert_trajectory_np[:-1, :]
+            target_s_np = expert_trajectory_np[1:, :]
 
         input_seqs_list.append(torch.from_numpy(input_s_np))
         target_seqs_list.append(torch.from_numpy(target_s_np))
@@ -147,11 +181,23 @@ def lstm_collate_fn(batch):
     padded_target_seqs = pad_sequence(target_seqs_list, batch_first=True, padding_value=0.0)
     goal_states_batch = torch.stack(goal_states_list)
 
+    # Create MLM Predicate Mask
+    # This mask indicates which elements of the *input* sequence should be predicted by the MLM head.
+    mlm_predicate_mask = torch.zeros_like(padded_input_seqs, dtype=torch.float32)
+    if mlm_mask_prob > 0:
+        for i in range(padded_input_seqs.shape[0]):
+            seq_len = int(lengths[i])
+            if seq_len > 0:
+                prob_matrix = torch.full((seq_len, padded_input_seqs.shape[2]), mlm_mask_prob)
+                masked_indices = torch.bernoulli(prob_matrix).bool()
+                mlm_predicate_mask[i, :seq_len, :] = masked_indices.float()
+
     return {
         "input_sequences": padded_input_seqs,
         "goal_states": goal_states_batch,
         "target_sequences": padded_target_seqs,
         "lengths": lengths,
         "ids": ids_list,
-        "expert_trajectories": expert_trajectories_orig_list,  # List of original trajectory tensors
+        "expert_trajectories": expert_trajectories_orig_list,
+        "mlm_predicate_mask": mlm_predicate_mask,  # Add to batch dict
     }

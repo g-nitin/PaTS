@@ -45,6 +45,9 @@ class PaTS_LSTM(nn.Module):
         # Auxiliary head for Masked Language Modeling (state reconstruction)
         if use_mlm_task:
             self.mlm_head = nn.Linear(hidden_size, num_features)
+            print("INFO: PaTS_LSTM initialized with an active MLM head.")
+        else:
+            print("INFO: PaTS_LSTM initialized without an MLM head.")
 
     def forward(self, current_states_batch, goal_state_batch, lengths, h_init=None, c_init=None):
         """

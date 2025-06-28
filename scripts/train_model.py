@@ -61,11 +61,13 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
 
             # Calculate MLM Loss (Auxiliary Task)
             loss_mlm = torch.tensor(0.0).to(DEVICE)
+            mlm_loss_calculated = False  # Verification flag
             if args.use_mlm_task and mlm_logits is not None:
                 num_masked_elements = mlm_predicate_mask.sum()
                 if num_masked_elements > 0:
                     loss_mlm_unreduced = criterion(mlm_logits, input_seqs)
                     loss_mlm = (loss_mlm_unreduced * mlm_predicate_mask).sum() / num_masked_elements
+                    mlm_loss_calculated = True
 
             # Total Loss
             total_loss = loss_forecasting + args.mlm_loss_weight * loss_mlm
@@ -73,6 +75,13 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
             if args.clip_grad_norm is not None and args.clip_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
             optimizer.step()
+
+            
+            # After the loop for one batch, before updating epoch losses:
+            if args.use_mlm_task and not mlm_loss_calculated:
+                # This will print a warning on the first batch if MLM isn't working
+                if num_train_batches == 0: # Print only once per epoch
+                    print("  [WARNING] MLM task is enabled, but MLM loss was not calculated for this batch. Check mask or model.")
 
             epoch_train_loss += total_loss.item()
             epoch_forecast_loss += loss_forecasting.item()

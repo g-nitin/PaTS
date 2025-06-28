@@ -24,9 +24,10 @@ class PaTS_LSTM(nn.Module):
         :type use_mlm_task: bool
         """
         super(PaTS_LSTM, self).__init__()
-        self.num_features = num_features  # F
-        self.hidden_size = hidden_size  # H
-        self.num_lstm_layers = num_lstm_layers  # L
+        self.num_features = num_features
+        self.hidden_size = hidden_size
+        self.num_lstm_layers = num_lstm_layers
+        self.use_mlm_task = use_mlm_task
 
         # Input to LSTM is concat(S_t, S_G), so 2 * num_features
         self.lstm = nn.LSTM(
@@ -42,7 +43,7 @@ class PaTS_LSTM(nn.Module):
         self.forecasting_head = nn.Linear(hidden_size, num_features)
 
         # Auxiliary head for Masked Language Modeling (state reconstruction)
-        if self.use_mlm_task:
+        if use_mlm_task:
             self.mlm_head = nn.Linear(hidden_size, num_features)
 
     def forward(self, current_states_batch, goal_state_batch, lengths, h_init=None, c_init=None):

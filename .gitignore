@@ -14,3 +14,5 @@ build/
 training_outputs/*
 benchmark_results/*
 slurm/*
+
+**/__pycache__/

@@ -16,6 +16,9 @@ from pddlpy import DomainProblem
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 # ** Configuration **
+NUM_RUNS = 3  # Number of times to run the evaluation
+BASE_SEED = 13  # Base seed for reproducibility
+
 PLANNING_DIR = Path("/Users", "nitingupta", "usc", "aiisc", "libraries", "planning")
 
 MODEL_PATH = PLANNING_DIR / "plansformer_v3" / "model_files"
@@ -51,9 +54,6 @@ if OUTPUT_DIR.exists():
 if not OUTPUT_DIR.exists():
     print(f"Creating output directory: {OUTPUT_DIR}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-NUM_RUNS = 1  # Number of times to run the evaluation
-BASE_SEED = 13  # Base seed for reproducibility
 
 
 def format_atom_for_plansformer(atom_obj, for_action_schema=False):
@@ -461,9 +461,7 @@ def main():
 
         # Optimality per run
         plt.figure(figsize=(10, 6))
-        sns.barplot(
-            x="run_id", y="optimality_rate_percent", data=per_run_df, hue="run_id", palette="mako", legend=False
-        )
+        sns.barplot(x="run_id", y="optimality_rate_percent", data=per_run_df, hue="run_id", palette="mako", legend=False)
         plt.title("Plansformer Optimality Rate per Run")
         plt.xlabel("Run ID")
         plt.ylabel("Optimality Rate (%)")

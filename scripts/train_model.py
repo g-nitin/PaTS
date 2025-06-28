@@ -155,6 +155,8 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
 
 
 def main():
+    print("Starting unified training script for PaTS models...")
+
     parser = argparse.ArgumentParser(description="Unified Training Script for PaTS Models")
 
     # Common arguments

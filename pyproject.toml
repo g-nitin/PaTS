@@ -1,5 +1,6 @@
 [project]
 dependencies = [
+  "dtaidistance>=2.3.13",
   "hf-xet>=1.1.2",
   "loguru>=0.7.3",
   "matplotlib>=3.10.3",

@@ -124,6 +124,20 @@ wheels = [
 ]
 
 [[package]]
+name = "dtaidistance"
+version = "2.3.13"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/32/0d/04de7998fba3b4881bf9abb4abe4a5422a53050670000ea7f03abaf9d7ed/dtaidistance-2.3.13.tar.gz", hash = "sha256:b0344a9b6f642863fcedacf5de86c4a0a0d4b4adec9b9be561a6f513ecf5e695", size = 985784 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/71/5e/95d32583d7f0a76ece94177724465d4f4547e078c48c6588c06d40bf16bf/dtaidistance-2.3.13-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:a09b9916f8ecbf11ef3f8824bfb306c1c3bfc63a32dcb4703551a1d5bbe6fa6c", size = 1529651 },
+    { url = "https://files.pythonhosted.org/packages/d5/70/5c8994a7d1408b89ca8b66773e7f005482013da5cb49816a7bc381d7faf7/dtaidistance-2.3.13-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d071392388dab99462922df8e4fb99f905e59888bd7246dee318ba7fe0d6332d", size = 2990303 },
+    { url = "https://files.pythonhosted.org/packages/bf/9e/b81d1db49a492dbd79eef25b852651b74c519af5fa081b7b2947275ae2ba/dtaidistance-2.3.13-cp312-cp312-win_amd64.whl", hash = "sha256:465f45d380a1cd4416201a9aeffa9fdf34848db10fe66918456d616989d61316", size = 1040780 },
+]
+
+[[package]]
 name = "filelock"
 version = "3.18.0"
 source = { registry = "https://pypi.org/simple" }
@@ -501,6 +515,7 @@ name = "pats"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "dtaidistance" },
     { name = "hf-xet" },
     { name = "loguru" },
     { name = "matplotlib" },
@@ -522,6 +537,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dtaidistance", specifier = ">=2.3.13" },
     { name = "hf-xet", specifier = ">=1.1.2" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "matplotlib", specifier = ">=3.10.3" },

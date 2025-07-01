@@ -1,3 +1,4 @@
+import warnings
 import argparse
 import sys
 from datetime import datetime
@@ -227,6 +228,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.model_type == "ttm" and (args.mlm_loss_weight or args.mlm_mask_prob):
+        warnings.warn("MLM-related arguments are not applicable for TTM. Ignoring them.")
 
     print(f"Using device: {DEVICE}")
     torch.manual_seed(args.seed)

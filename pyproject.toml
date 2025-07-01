@@ -1,6 +1,6 @@
 [project]
 dependencies = [
-  "dtaidistance>=2.3.13",
+  "fastdtw>=0.3.4",
   "hf-xet>=1.1.2",
   "loguru>=0.7.3",
   "matplotlib>=3.10.3",
@@ -26,8 +26,8 @@ py-modules = []
 # Steps:
 # 1. Activate conda environment first (conda activate pats-env)
 # 2. `pip install -e .`: Install manually install to env (conda, etc.) with pip.
-# 3. `uv pip install "granite-tsfm[notebooks] @ git+https://github.com/ibm-granite/granite-tsfm.git@v0.2.22"`
-# 4. Conda deactivate
+# 3. `pip install "granite-tsfm[notebooks] @ git+https://github.com/ibm-granite/granite-tsfm.git@v0.2.22"`
+# 4. `conda deactivate`
 
 [dependency-groups]
 dev = [

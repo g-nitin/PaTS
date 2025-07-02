@@ -17,7 +17,7 @@ echo $CONDA_DEFAULT_ENV
 hostname
 echo "Python version: $(python --version)"
 
-model_type='ttm'
+model_type='lstm'
 num_blocks=4
 
 # Generate timestamp and build unique dirs/paths
@@ -51,6 +51,7 @@ python -m scripts.train_model \
     --batch_size 32 \
     --learning_rate 0.001 \
     --seed 13
+    --constraint_loss_weight 1.0
 
 echo -e "\n"
 echo "Training completed. Outputs in $output_dir"

@@ -55,11 +55,12 @@ The typical workflow for using PaTS is:
 - **`data/generate_dataset.sh`**: Automates the entire data generation pipeline from PDDL problem generation to encoded trajectories and predicate manifests.
 - **`data/parse_and_encode.py`**: Parses PDDL files (for initial/goal states) and VAL output logs (for state transitions), reconstructs state trajectories, encodes them into binary vectors based on a generated predicate order, and saves the binary data along with the crucial `predicate_manifest_<N>.txt` file.
 - **`data/analyze_dataset_splits.py`**: Analyzes the generated dataset for distributions and splits it into training, validation, and test sets, creating `*_files.txt`.
-- **`scripts/train_model.py`**: The **central script for training PaTS models (LSTM, TTM, etc.)**. It handles dataset loading, model instantiation, and invoking model-specific training loops.
+- **`scripts/train_model.py`**: The **central script for training PaTS models (LSTM, TTM, etc.)**. It handles dataset loading, model instantiation, and invoking model-specific training loops. It can optionally add a constraint violation loss term during training (for LSTM) by using the `--use_constraint_loss` flag. This leverages the `BlocksWorldValidator` to guide the model towards generating physically valid states.
 - **`scripts/pats_dataset.py`**: Contains the `PaTSDataset` class, a unified PyTorch Dataset for loading pre-encoded binary trajectories and goal states from `.npy` files based on split file lists (e.g., `train_files.txt`).
 - **`scripts/BlocksWorldValidator.py`**:
   - Contains the `BlocksWorldValidator` class responsible for checking the physical validity of individual states and the legality of transitions between states in the Blocks World domain.
   - **Crucially, it is initialized with `num_blocks` and the path to the `predicate_manifest_<N>.txt` file.** This allows it to dynamically understand the structure of the binary state vectors it receives, making it robust to encoding changes.
+  - Provides a differentiable `calculate_constraint_violation_loss` method that can be used during training to penalize the model for generating physically invalid states, directly embedding domain rules into the learning process.
   - It defines `Violation` and `ValidationResult` dataclasses to structure validation output.
 - **`scripts/benchmark.py`**:
   - The **central script for evaluating trained PaTS models.**

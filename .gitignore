@@ -14,5 +14,6 @@ build/
 training_outputs/*
 benchmark_results/*
 slurm/*
+local-run.sh
 
 **/__pycache__/

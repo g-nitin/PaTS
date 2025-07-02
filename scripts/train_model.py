@@ -12,6 +12,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from transformers.trainer_utils import set_seed as ttm_set_seed
 
+from scripts.BlocksWorldValidator import BlocksWorldValidator
 from scripts.models.lstm import PaTS_LSTM, lstm_collate_fn
 from scripts.models.ttm import BlocksWorldTTM, determine_ttm_lengths
 from scripts.models.ttm import ModelConfig as TTMModelConfig
@@ -21,7 +22,7 @@ from scripts.pats_dataset import PaTSDataset
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 
 
-def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, model_save_path):
+def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_features, model_save_path):
     print("Starting LSTM training...")
     # Ensure criterion is defined here or passed if it's specific
     criterion = nn.BCEWithLogitsLoss(reduction="none")
@@ -32,7 +33,7 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
 
     for epoch in range(args.epochs):
         model.train()
-        epoch_train_loss, epoch_forecast_loss, epoch_mlm_loss = 0.0, 0.0, 0.0
+        epoch_train_loss, epoch_forecast_loss, epoch_mlm_loss, epoch_constraint_loss = 0.0, 0.0, 0.0, 0.0
         num_train_batches = 0
 
         for batch_data in train_loader:
@@ -70,8 +71,16 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
                     loss_mlm = (loss_mlm_unreduced * mlm_predicate_mask).sum() / num_masked_elements
                     mlm_loss_calculated = True
 
+            # Calculate Constraint Violation Loss
+            loss_constraint = torch.tensor(0.0).to(DEVICE)
+            if args.use_constraint_loss:
+                # Flatten the logits and mask to get only the relevant predictions
+                # Shape becomes (total_valid_steps_in_batch, num_features)
+                masked_logits = forecasting_logits[forecasting_mask]
+                loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
+
             # Total Loss
-            total_loss = loss_forecasting + args.mlm_loss_weight * loss_mlm
+            total_loss = loss_forecasting + args.mlm_loss_weight * loss_mlm + args.constraint_loss_weight * loss_constraint
             total_loss.backward()
             if args.clip_grad_norm is not None and args.clip_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
@@ -87,15 +96,17 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
             epoch_train_loss += total_loss.item()
             epoch_forecast_loss += loss_forecasting.item()
             epoch_mlm_loss += loss_mlm.item()
+            epoch_constraint_loss += loss_constraint.item()
             num_train_batches += 1
 
         avg_train_loss = epoch_train_loss / num_train_batches if num_train_batches > 0 else float("inf")
         avg_forecast_loss = epoch_forecast_loss / num_train_batches if num_train_batches > 0 else float("inf")
         avg_mlm_loss = epoch_mlm_loss / num_train_batches if num_train_batches > 0 else float("inf")
+        avg_constraint_loss = epoch_constraint_loss / num_train_batches if num_train_batches > 0 else float("inf")
 
         # Validation
         model.eval()
-        epoch_val_loss, epoch_val_forecast_loss, epoch_val_mlm_loss = 0.0, 0.0, 0.0
+        epoch_val_loss, epoch_val_forecast_loss, epoch_val_mlm_loss, epoch_val_constraint_loss = 0.0, 0.0, 0.0, 0.0
         num_val_batches = 0
         with torch.no_grad():
             for batch_data in val_loader:
@@ -127,19 +138,29 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
                     if num_masked_elements > 0:
                         loss_mlm = (criterion(mlm_logits, input_seqs) * mlm_predicate_mask).sum() / num_masked_elements
 
-                total_loss = loss_forecasting + args.mlm_loss_weight * loss_mlm
+                # Calculate Constraint Violation Loss for validation
+                loss_constraint = torch.tensor(0.0).to(DEVICE)
+                if args.use_constraint_loss:
+                    masked_logits = forecasting_logits[forecasting_mask]
+                    loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
+
+                total_loss = (
+                    loss_forecasting + args.mlm_loss_weight * loss_mlm + args.constraint_loss_weight * loss_constraint
+                )
                 epoch_val_loss += total_loss.item()
                 epoch_val_forecast_loss += loss_forecasting.item()
                 epoch_val_mlm_loss += loss_mlm.item()
+                epoch_val_constraint_loss += loss_constraint.item()
                 num_val_batches += 1
 
         avg_val_loss = epoch_val_loss / num_val_batches if num_val_batches > 0 else float("inf")
         avg_val_forecast_loss = epoch_val_forecast_loss / num_val_batches if num_val_batches > 0 else float("inf")
         avg_val_mlm_loss = epoch_val_mlm_loss / num_val_batches if num_val_batches > 0 else float("inf")
+        avg_val_constraint_loss = epoch_val_constraint_loss / num_val_batches if num_val_batches > 0 else float("inf")
         scheduler.step(avg_val_loss)
 
-        train_loss_str = f"Train Loss: {avg_train_loss:.4f} (F: {avg_forecast_loss:.4f}, M: {avg_mlm_loss:.4f})"
-        val_loss_str = f"Val Loss: {avg_val_loss:.4f} (F: {avg_val_forecast_loss:.4f}, M: {avg_val_mlm_loss:.4f})"
+        train_loss_str = f"Train Loss: {avg_train_loss:.4f} (F: {avg_forecast_loss:.4f}, M: {avg_mlm_loss:.4f}, C: {avg_constraint_loss:.4f})"
+        val_loss_str = f"Val Loss: {avg_val_loss:.4f} (F: {avg_val_forecast_loss:.4f}, M: {avg_val_mlm_loss:.4f}, C: {avg_val_constraint_loss:.4f})"
         print(f"Epoch [{epoch + 1}/{args.epochs}] {train_loss_str}, {val_loss_str}")
 
         if avg_val_loss < best_val_loss:
@@ -227,6 +248,13 @@ def main():
         help="Logging level for TTM.",
     )
 
+    parser.add_argument(
+        "--use_constraint_loss", action="store_true", help="Enable constraint violation auxiliary loss for LSTM."
+    )
+    parser.add_argument(
+        "--constraint_loss_weight", type=float, default=1.0, help="Weight for the constraint violation auxiliary loss."
+    )
+
     args = parser.parse_args()
 
     if args.model_type == "ttm" and (args.mlm_loss_weight or args.mlm_mask_prob):
@@ -244,6 +272,21 @@ def main():
     model_specific_output_dir = args.output_dir / f"{args.model_type}_N{args.num_blocks}"
     model_specific_output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Model outputs will be saved to: {model_specific_output_dir}")
+
+    # Instantiate the validator for use in training
+    validator = None
+    if args.model_type == "lstm" and args.use_constraint_loss:
+        print("Constraint loss enabled. Initializing BlocksWorldValidator...")
+        manifest_path = args.dataset_dir / f"predicate_manifest_{args.num_blocks}.txt"
+        if not manifest_path.exists():
+            print(f"ERROR: Predicate manifest not found at {manifest_path}. Cannot use constraint loss.")
+            sys.exit(1)
+        try:
+            validator = BlocksWorldValidator(args.num_blocks, manifest_path)
+            print("Validator initialized successfully.")
+        except Exception as e:
+            print(f"ERROR: Failed to initialize validator: {e}")
+            sys.exit(1)
 
     # Load Datasets
     print("Loading datasets...")
@@ -300,7 +343,7 @@ def main():
         print(f"Total trainable LSTM parameters: {total_params}")
 
         lstm_model_save_path = model_specific_output_dir / f"pats_lstm_model_N{args.num_blocks}.pth"
-        train_lstm_model_loop(model, train_dataloader, val_dataloader, args, num_features, lstm_model_save_path)
+        train_lstm_model_loop(model, train_dataloader, val_dataloader, validator, args, num_features, lstm_model_save_path)
 
     elif args.model_type == "ttm":
         print("Starting TTM training setup...")

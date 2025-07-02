@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 
 @dataclass
@@ -41,6 +43,12 @@ class BlocksWorldValidator:
         self.clear_indices: Dict[str, int] = {}
         self.held_indices: Dict[str, int] = {}
         self.arm_empty_index: Optional[int] = None
+
+        # Store indices as lists for easier tensor gathering
+        self._on_table_idx_list: List[int] = []
+        self._on_block_idx_list: List[int] = []
+        self._clear_idx_list: List[int] = []
+        self._held_idx_list: List[int] = []
 
         self._setup_feature_indices()
 
@@ -100,11 +108,78 @@ class BlocksWorldValidator:
                     self.held_indices[block_name] = idx
                 continue
 
+        # Populate the index lists for tensor operations
+        self._on_table_idx_list = list(self.on_table_indices.values())
+        self._on_block_idx_list = list(self.on_block_indices.values())
+        self._clear_idx_list = list(self.clear_indices.values())
+        self._held_idx_list = list(self.held_indices.values())
+
         # Sanity check: ensure arm_empty_index was found
         if self.arm_empty_index is None:
             raise ValueError("(arm-empty) predicate not found in manifest. This is required.")
 
-        # TODO: Further sanity checks can be added (e.g., all expected index dicts are populated for all blocks)
+    def calculate_constraint_violation_loss(self, state_logits: torch.Tensor) -> torch.Tensor:
+        """
+        Calculates a differentiable loss term based on physical constraint violations.
+        Operates on a batch of state logits from the model.
+
+        :param state_logits: A tensor of shape (N, F) where N is the number of states in the batch and F is the number of features.
+        :return: A scalar tensor representing the mean violation loss per state.
+        """
+        if state_logits.shape[0] == 0:
+            return torch.tensor(0.0, device=state_logits.device)
+
+        # Use probabilities for a smoother loss landscape
+        state_probs = torch.sigmoid(state_logits)
+        total_loss = torch.tensor(0.0, device=state_probs.device)
+        num_states = state_probs.shape[0]
+
+        # 1. PHYS_BLOCK_MULTI_POS: Each block must be in exactly one position.
+        # (on table, on another block, or held).
+        for block_name in self.block_names:
+            pos_indices = []
+            if block_name in self.on_table_indices:
+                pos_indices.append(self.on_table_indices[block_name])
+            if block_name in self.held_indices:
+                pos_indices.append(self.held_indices[block_name])
+            for b1, b2 in self.on_block_indices.keys():
+                if b1 == block_name:
+                    pos_indices.append(self.on_block_indices[(b1, b2)])
+
+            # Sum the probabilities of the block being in any position
+            pos_probs_sum = state_probs[:, pos_indices].sum(dim=1)
+            # The sum should be 1.0. Penalize deviation from 1.0.
+            total_loss += F.mse_loss(pos_probs_sum, torch.ones_like(pos_probs_sum))
+
+        # 2. PHYS_CLEAR_CONFLICT: A block marked 'clear' cannot have another block on it.
+        for block_name in self.block_names:
+            clear_prob = state_probs[:, self.clear_indices[block_name]]
+
+            # Sum probabilities of any other block being on top of this one
+            on_top_indices = [
+                self.on_block_indices[(other_block, block_name)]
+                for other_block in self.block_names
+                if other_block != block_name
+            ]
+            if on_top_indices:
+                on_top_prob_sum = state_probs[:, on_top_indices].sum(dim=1)
+                # Violation if both clear_prob and on_top_prob are high.
+                # Their product should be 0.
+                violation_prob = clear_prob * on_top_prob_sum
+                total_loss += violation_prob.mean()
+
+        # 3. PHYS_ARM_EMPTY_HOLDING_CONFLICT & PHYS_ARM_NOT_EMPTY_NOT_HOLDING_CONFLICT
+        # Arm is empty IFF it is not holding any block.
+        if self.arm_empty_index is not None and self._held_idx_list:
+            arm_empty_prob = state_probs[:, self.arm_empty_index]
+            is_holding_prob = state_probs[:, self._held_idx_list].sum(dim=1)
+
+            # The sum of arm_empty_prob and is_holding_prob should be 1.0
+            # e.g., if arm_empty is 0.9, is_holding should be 0.1.
+            # This elegantly captures both conflict types.
+            total_loss += F.mse_loss(arm_empty_prob + is_holding_prob, torch.ones_like(arm_empty_prob))
+
+        return total_loss / num_states if num_states > 0 else torch.tensor(0.0)
 
     def _check_physical_constraints(self, state: List[int] | np.ndarray) -> Tuple[bool, List[Violation]]:
         """Check if state satisfies basic physical constraints"""
@@ -281,9 +356,7 @@ class BlocksWorldValidator:
         if len(np_states) > 1:
             for i in range(len(np_states) - 1):
                 # Pass np_states[i] and np_states[i+1]
-                valid_transition, transition_violations_list = self._check_legal_transition(
-                    np_states[i], np_states[i + 1]
-                )
+                valid_transition, transition_violations_list = self._check_legal_transition(np_states[i], np_states[i + 1])
 
                 is_acceptable_no_change = False
                 if not valid_transition:

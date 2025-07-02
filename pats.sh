@@ -17,21 +17,30 @@ echo $CONDA_DEFAULT_ENV
 hostname
 echo "Python version: $(python --version)"
 
-model_type='lstm'
+model_type='ttm'
 num_blocks=4
 
 # Generate timestamp and build unique dirs/paths
 timestamp=$(date +%Y%m%d_%H%M%S)
 output_dir="./training_outputs/${model_type}_${timestamp}"
 benchmark_output_dir="./benchmark_results/${model_type}_${timestamp}"
-model_path="${output_dir}/${model_type}_N${num_blocks}/final_model_assets"
+
+if [ "$model_type" = 'lstm' ]; then
+    echo "Using LSTM model"
+    model_path="${output_dir}/${model_type}_N${num_blocks}/pats_lstm_model_N${num_blocks}.pth"
+elif [ "$model_type" = 'ttm' ]; then
+    echo "Using TTM model"
+    model_path="${output_dir}/${model_type}_N${num_blocks}/final_model_assets"
+else
+    echo "Unsupported model type: $model_type"
+    exit 1
+fi
 
 mkdir -p "$output_dir"
 mkdir -p "$benchmark_output_dir"
 
 echo -e "\n"
 echo "Starting training with model: $model_type"
-echo "Using masking"
 python -m scripts.train_model \
     --model_type $model_type \
     --dataset_dir data/blocks_4 \
@@ -41,10 +50,7 @@ python -m scripts.train_model \
     --epochs 400 \
     --batch_size 32 \
     --learning_rate 0.001 \
-    --seed 13 \
-    --use_mlm_task \
-    --mlm_loss_weight 1.0 \
-    --mlm_mask_prob 0.75
+    --seed 13
 
 echo -e "\n"
 echo "Training completed. Outputs in $output_dir"

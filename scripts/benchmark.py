@@ -139,16 +139,28 @@ class LSTMWrapper(PlannableModel):
         print(f"Loading LSTM model from: {self.model_path}")
         checkpoint = torch.load(self.model_path, map_location=self.device)
 
+        # Read model parameters from the checkpoint
         num_features = checkpoint.get("num_features")
         hidden_size = checkpoint.get("hidden_size")
         num_lstm_layers = checkpoint.get("num_lstm_layers")
-        # dropout_prob is not typically saved, assume a default or make it part of config if needed
+        dropout_prob = checkpoint.get("dropout_prob", 0.2)
+
+        # Check if the model was trained with the MLM task
+        was_trained_with_mlm = checkpoint.get("use_mlm_task", False)
 
         if not all([num_features, hidden_size, num_lstm_layers]):
             raise ValueError("LSTM checkpoint missing required parameters (num_features, hidden_size, num_lstm_layers).")
 
         self._state_dim = num_features
-        self.lstm_model = PaTS_LSTM(num_features, hidden_size, num_lstm_layers).to(self.device)
+        # Instantiate the model with the correct configuration based on the checkpoint
+        self.lstm_model = PaTS_LSTM(
+            num_features=num_features,
+            hidden_size=hidden_size,
+            num_lstm_layers=num_lstm_layers,
+            dropout_prob=dropout_prob,
+            use_mlm_task=was_trained_with_mlm,
+        ).to(self.device)
+
         self.lstm_model.load_state_dict(checkpoint["model_state_dict"])
         self.lstm_model.eval()
         self.model = self.lstm_model  # For consistency with PlannableModel

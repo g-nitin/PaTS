@@ -26,7 +26,7 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
     # Ensure criterion is defined here or passed if it's specific
     criterion = nn.BCEWithLogitsLoss(reduction="none")
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=10, factor=0.5, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=10, factor=0.5)
 
     best_val_loss = float("inf")
 

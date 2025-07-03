@@ -50,7 +50,8 @@ python -m scripts.train_model \
     --epochs 400 \
     --batch_size 32 \
     --learning_rate 0.001 \
-    --seed 13
+    --seed 13 \
+    --use_constraint_loss \
     --constraint_loss_weight 1.0
 
 echo -e "\n"

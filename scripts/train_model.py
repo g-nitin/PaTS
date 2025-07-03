@@ -1,3 +1,4 @@
+from pprint import pprint
 import warnings
 import argparse
 import sys
@@ -74,10 +75,13 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
             # Calculate Constraint Violation Loss
             loss_constraint = torch.tensor(0.0).to(DEVICE)
             if args.use_constraint_loss:
-                # Flatten the logits and mask to get only the relevant predictions
-                # Shape becomes (total_valid_steps_in_batch, num_features)
-                masked_logits = forecasting_logits[forecasting_mask]
-                loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
+                # The validator expects a 2D tensor of shape (num_states, num_features).
+                # We select all feature vectors from the valid time steps across the batch.
+                # `forecasting_mask` is (B, S_max, F), so `forecasting_mask[:, :, 0]` is (B, S_max).
+                # Applying this 2D mask to the 3D logits tensor gives a 2D result.
+                masked_logits = forecasting_logits[forecasting_mask[:, :, 0]]
+                if masked_logits.ndim == 2 and masked_logits.shape[0] > 0:
+                    loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
 
             # Total Loss
             total_loss = loss_forecasting + args.mlm_loss_weight * loss_mlm + args.constraint_loss_weight * loss_constraint
@@ -141,8 +145,10 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
                 # Calculate Constraint Violation Loss for validation
                 loss_constraint = torch.tensor(0.0).to(DEVICE)
                 if args.use_constraint_loss:
-                    masked_logits = forecasting_logits[forecasting_mask]
-                    loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
+                    # Same logic as in the training loop to get a 2D tensor for the validator.
+                    masked_logits = forecasting_logits[forecasting_mask[:, :, 0]]
+                    if masked_logits.ndim == 2 and masked_logits.shape[0] > 0:
+                        loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
 
                 total_loss = (
                     loss_forecasting + args.mlm_loss_weight * loss_mlm + args.constraint_loss_weight * loss_constraint
@@ -257,8 +263,14 @@ def main():
 
     args = parser.parse_args()
 
+    print("Parsed Arguments:")
+    pprint(vars(args))
+
     if args.model_type == "ttm" and (args.mlm_loss_weight or args.mlm_mask_prob):
         warnings.warn("MLM-related arguments are not applicable for TTM. Ignoring them.")
+    
+    if args.model_type == "ttm" and (args.use_constraint_loss or args.constraint_loss_weight != 1.0):
+        warnings.warn("Constraint loss arguments are not applicable for TTM. Ignoring them.")
 
     print(f"Using device: {DEVICE}")
     torch.manual_seed(args.seed)

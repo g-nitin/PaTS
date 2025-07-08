@@ -1,10 +1,10 @@
-from pprint import pprint
-import warnings
 import argparse
 import sys
+import warnings
 from datetime import datetime
 from functools import partial
 from pathlib import Path
+from pprint import pprint
 
 import numpy as np
 import torch
@@ -90,12 +90,13 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
             optimizer.step()
 
-            
             # After the loop for one batch, before updating epoch losses:
             if args.use_mlm_task and not mlm_loss_calculated:
                 # This will print a warning on the first batch if MLM isn't working
-                if num_train_batches == 0: # Print only once per epoch
-                    print("  [WARNING] MLM task is enabled, but MLM loss was not calculated for this batch. Check mask or model.")
+                if num_train_batches == 0:  # Print only once per epoch
+                    print(
+                        "  [WARNING] MLM task is enabled, but MLM loss was not calculated for this batch. Check mask or model."
+                    )
 
             epoch_train_loss += total_loss.item()
             epoch_forecast_loss += loss_forecasting.item()
@@ -216,6 +217,13 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size.")
     parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+    parser.add_argument(
+        "--encoding_type",
+        type=str,
+        default="binary",
+        choices=["binary", "sas"],
+        help="The encoding type of the dataset to use.",
+    )
 
     # LSTM specific arguments
     parser.add_argument("--lstm_hidden_size", type=int, default=128, help="Hidden size for LSTM.")
@@ -268,7 +276,7 @@ def main():
 
     if args.model_type == "ttm" and (args.mlm_loss_weight or args.mlm_mask_prob):
         warnings.warn("MLM-related arguments are not applicable for TTM. Ignoring them.")
-    
+
     if args.model_type == "ttm" and (args.use_constraint_loss or args.constraint_loss_weight != 1.0):
         warnings.warn("Constraint loss arguments are not applicable for TTM. Ignoring them.")
 
@@ -289,22 +297,34 @@ def main():
     validator = None
     if args.model_type == "lstm" and args.use_constraint_loss:
         print("Constraint loss enabled. Initializing BlocksWorldValidator...")
-        manifest_path = args.dataset_dir / f"predicate_manifest_{args.num_blocks}.txt"
-        if not manifest_path.exists():
-            print(f"ERROR: Predicate manifest not found at {manifest_path}. Cannot use constraint loss.")
-            sys.exit(1)
-        try:
-            validator = BlocksWorldValidator(args.num_blocks, manifest_path)
-            print("Validator initialized successfully.")
-        except Exception as e:
-            print(f"ERROR: Failed to initialize validator: {e}")
-            sys.exit(1)
+        if args.encoding_type == "binary":
+            manifest_path = args.dataset_dir / f"predicate_manifest_{args.num_blocks}.txt"
+            if not manifest_path.exists():
+                print(
+                    f"ERROR: Predicate manifest not found at {manifest_path}. Cannot use constraint loss for binary encoding."
+                )
+                sys.exit(1)
+            try:
+                validator = BlocksWorldValidator(args.num_blocks, args.encoding_type, predicate_manifest_file=manifest_path)
+                print("Validator for binary encoding initialized successfully.")
+            except Exception as e:
+                print(f"ERROR: Failed to initialize validator: {e}")
+                sys.exit(1)
+        elif args.encoding_type == "sas":
+            # SAS validator doesn't need a manifest file.
+            print("WARNING: Constraint loss for SAS encoding is not implemented and will have no effect.")
+            validator = BlocksWorldValidator(args.num_blocks, args.encoding_type)
+            print("Validator for SAS encoding initialized.")
 
     # Load Datasets
     print("Loading datasets...")
     try:
-        train_dataset = PaTSDataset(dataset_dir=args.dataset_dir, split_file_name="train_files.txt")
-        val_dataset = PaTSDataset(dataset_dir=args.dataset_dir, split_file_name="val_files.txt")
+        train_dataset = PaTSDataset(
+            dataset_dir=args.dataset_dir, split_file_name="train_files.txt", encoding_type=args.encoding_type
+        )
+        val_dataset = PaTSDataset(
+            dataset_dir=args.dataset_dir, split_file_name="val_files.txt", encoding_type=args.encoding_type
+        )
     except Exception as e:
         print(f"Error initializing PaTSDataset: {e}")
         sys.exit(1)

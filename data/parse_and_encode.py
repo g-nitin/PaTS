@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import re
 from pathlib import Path
@@ -44,6 +45,51 @@ def get_ordered_predicate_list(num_blocks, block_names_prefix="b"):
 
     # The generated predicates are already in a normalized form by construction.
     return predicates
+
+
+def state_preds_to_sas_vector(state_predicates_set, num_blocks, block_names):
+    """
+    Converts a set of true predicate strings (normalized) to a SAS+ position vector.
+    Vector of size num_blocks.
+    - Index i corresponds to block_names[i] (e.g., b1).
+    - Value 0 means on the table.
+    - Value j > 0 means on block_names[j-1] (e.g., value 2 means on b2).
+    - Value -1 means held by the arm.
+    """
+    # Initialize vector with a value indicating "floating", which validator should catch.
+    position_vector = np.full(num_blocks, -2, dtype=np.int8)
+
+    # Map block names to their 1-based index for "on" relationships (e.g., b1 -> 1, b2 -> 2)
+    block_to_sas_idx = {name: i + 1 for i, name in enumerate(block_names)}
+
+    for pred in state_predicates_set:
+        # (on-table bX)
+        m_on_table = re.fullmatch(r"\(on-table (b\d+)\)", pred)
+        if m_on_table:
+            block_name = m_on_table.group(1)
+            block_idx = block_names.index(block_name)
+            position_vector[block_idx] = 0
+            continue
+
+        # (on bX bY)
+        m_on_block = re.fullmatch(r"\(on (b\d+) (b\d+)\)", pred)
+        if m_on_block:
+            block_on_top = m_on_block.group(1)
+            block_below = m_on_block.group(2)
+            top_idx = block_names.index(block_on_top)
+            below_sas_idx = block_to_sas_idx[block_below]
+            position_vector[top_idx] = below_sas_idx
+            continue
+
+        # (holding bX)
+        m_holding = re.fullmatch(r"\(holding (b\d+)\)", pred)
+        if m_holding:
+            block_name = m_holding.group(1)
+            block_idx = block_names.index(block_name)
+            position_vector[block_idx] = -1
+            continue
+
+    return position_vector
 
 
 # ** Predicate String Normalization **
@@ -253,27 +299,55 @@ def main():
     )
     parser.add_argument("--binary_goal_output", required=True, help="Path to save binary encoded goal state (.npy).")
     parser.add_argument("--manifest_output_dir", required=True, help="Directory to save the predicate manifest file.")
+    parser.add_argument(
+        "--encoding_type",
+        type=str,
+        choices=["binary", "sas"],
+        default="binary",
+        help="The type of state encoding to use: 'binary' (predicate vector) or 'sas' (position vector).",
+    )
 
     args = parser.parse_args()
 
     print(f"    INFO: Processing {args.pddl_problem_file} with {args.val_output_file}")
+    print(f"    INFO: Using encoding type: {args.encoding_type}")
 
     try:
-        # 1. Generate the master list of all possible predicates (normalized)
-        ordered_master_pred_list = get_ordered_predicate_list(args.num_blocks, block_names_prefix="b")
-        if not ordered_master_pred_list:
-            print(f"ERROR: Could not generate master predicate list for {args.num_blocks} blocks.")
-            exit(1)
+        # Generate block names once
+        block_names = [f"b{i + 1}" for i in range(args.num_blocks)]
 
-        # Save the predicate manifest
-        manifest_dir = Path(args.manifest_output_dir)
-        manifest_dir.mkdir(parents=True, exist_ok=True)
-        manifest_file_path = manifest_dir / f"predicate_manifest_{args.num_blocks}.txt"
-        # Only write if it doesn't exist or if we want to ensure it's always fresh (for now, write always)
-        with open(manifest_file_path, "w") as f_manifest:
-            for pred_item in ordered_master_pred_list:
-                f_manifest.write(f"{pred_item}\n")
-        print(f"    INFO: Predicate manifest saved to: {manifest_file_path}")
+        # 1. Generate encoding-specific information
+        if args.encoding_type == "binary":
+            ordered_master_pred_list = get_ordered_predicate_list(args.num_blocks, block_names_prefix="b")
+            if not ordered_master_pred_list:
+                print(f"ERROR: Could not generate master predicate list for {args.num_blocks} blocks.")
+                exit(1)
+
+            # Save the predicate manifest
+            manifest_dir = Path(args.manifest_output_dir)
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            manifest_file_path = manifest_dir / f"predicate_manifest_{args.num_blocks}.txt"
+            with open(manifest_file_path, "w") as f_manifest:
+                for pred_item in ordered_master_pred_list:
+                    f_manifest.write(f"{pred_item}\n")
+            print(f"    INFO: Predicate manifest saved to: {manifest_file_path}")
+            encoding_info = {
+                "type": "binary",
+                "manifest_file": str(manifest_file_path.name),
+                "feature_dim": len(ordered_master_pred_list),
+            }
+        elif args.encoding_type == "sas":
+            # For SAS, the "manifest" is just the number of blocks.
+            ordered_master_pred_list = None  # Not used for SAS
+            encoding_info = {"type": "sas", "feature_dim": args.num_blocks, "block_order": block_names}
+        else:
+            raise ValueError(f"Unknown encoding type: {args.encoding_type}")
+
+        # Save the encoding info file
+        encoding_info_path = Path(args.manifest_output_dir) / f"encoding_info_{args.num_blocks}.json"
+        with open(encoding_info_path, "w") as f_info:
+            json.dump(encoding_info, f_info, indent=4)
+        print(f"    INFO: Encoding info saved to: {encoding_info_path}")
 
         # 2. Parse PDDL domain and problem files using pddlpy
         try:
@@ -318,48 +392,43 @@ def main():
             print(f"ERROR: Failed to extract any states from {args.val_output_file}. Trajectory is empty.")
             exit(1)
 
-        # 4. Convert each state in the trajectory to a binary vector
-        binary_trajectory = []
+        # 4. Convert each state in the trajectory to a vector
+        trajectory_vectors = []
         for state_preds_list_for_one_step in state_trajectory_pred_strings_list:
-            state_preds_set_for_one_step = set(state_preds_list_for_one_step)  # Convert list to set
-            binary_vector = state_preds_to_binary_vector(state_preds_set_for_one_step, ordered_master_pred_list)
-            binary_trajectory.append(binary_vector)
-        binary_trajectory_np = np.array(binary_trajectory, dtype=np.int8)
+            state_preds_set_for_one_step = set(state_preds_list_for_one_step)
+            if args.encoding_type == "binary":
+                vector = state_preds_to_binary_vector(state_preds_set_for_one_step, ordered_master_pred_list)
+            else:  # sas
+                vector = state_preds_to_sas_vector(state_preds_set_for_one_step, args.num_blocks, block_names)
+            trajectory_vectors.append(vector)
+        trajectory_np = np.array(trajectory_vectors, dtype=np.int8)
 
-        # 5. Convert goal state to binary vector
-        goal_binary_vector_np = state_preds_to_binary_vector(goal_state_preds_normalized_set, ordered_master_pred_list)
+        # 5. Convert goal state to vector
+        if args.encoding_type == "binary":
+            goal_vector_np = state_preds_to_binary_vector(goal_state_preds_normalized_set, ordered_master_pred_list)
+        else:  # sas
+            goal_vector_np = state_preds_to_sas_vector(goal_state_preds_normalized_set, args.num_blocks, block_names)
 
-        # 6. Save outputs
-        os.makedirs(os.path.dirname(args.text_trajectory_output), exist_ok=True)
-        with open(args.text_trajectory_output, "w") as f_text:
-            for i, state_preds_list in enumerate(state_trajectory_pred_strings_list):
-                f_text.write(f"State {i}:\n")
-                for pred in state_preds_list:  # Already sorted
-                    f_text.write(f"  {pred}\n")
-                f_text.write("\n")
-            f_text.write("Goal Predicates (Normalized):\n")
-            for pred in sorted(list(goal_state_preds_normalized_set)):
-                f_text.write(f"  {pred}\n")
+        # 6. Save outputs with new naming convention
+        base_traj_path = Path(args.binary_trajectory_output)
+        traj_output_path = base_traj_path.with_suffix(f".{args.encoding_type}.npy")
 
-        os.makedirs(os.path.dirname(args.binary_trajectory_output), exist_ok=True)
-        np.save(args.binary_trajectory_output, binary_trajectory_np)
+        base_goal_path = Path(args.binary_goal_output)
+        goal_output_path = base_goal_path.with_suffix(f".{args.encoding_type}.npy")
 
-        os.makedirs(os.path.dirname(args.binary_goal_output), exist_ok=True)
-        np.save(args.binary_goal_output, goal_binary_vector_np)
+        os.makedirs(os.path.dirname(traj_output_path), exist_ok=True)
+        np.save(traj_output_path, trajectory_np)
 
-        traj_len = (
-            binary_trajectory_np.shape[0] if binary_trajectory_np.ndim > 0 and binary_trajectory_np.size > 0 else 0
-        )
-        vec_dim = (
-            binary_trajectory_np.shape[1]
-            if binary_trajectory_np.ndim > 1 and traj_len > 0
-            else (len(ordered_master_pred_list) if ordered_master_pred_list else "N/A")
-        )
+        os.makedirs(os.path.dirname(goal_output_path), exist_ok=True)
+        np.save(goal_output_path, goal_vector_np)
+
+        traj_len = trajectory_np.shape[0] if trajectory_np.ndim > 0 and trajectory_np.size > 0 else 0
+        vec_dim = trajectory_np.shape[1] if trajectory_np.ndim > 1 and traj_len > 0 else encoding_info["feature_dim"]
 
         print(f"    INFO: Successfully processed. Trajectory Length: {traj_len}. Vector dim: {vec_dim}")
         print(f"    INFO: Text trajectory saved to: {args.text_trajectory_output}")
-        print(f"    INFO: Binary trajectory saved to: {args.binary_trajectory_output}")
-        print(f"    INFO: Binary goal saved to: {args.binary_goal_output}")
+        print(f"    INFO: Encoded trajectory saved to: {traj_output_path}")
+        print(f"    INFO: Encoded goal saved to: {goal_output_path}")
 
     except Exception as e:
         print(f"FATAL ERROR in parse_and_encode.py: {e}")

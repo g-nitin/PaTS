@@ -46,6 +46,7 @@ uv run python -m scripts.train_model \
     --dataset_dir data/blocks_4 \
     --dataset_split_dir data/blocks_4 \
     --num_blocks 4 \
+    --encoding_type binary \ # Specify the encoding: 'binary' or 'sas'
     --output_dir ./training_outputs \
     --epochs 100 \
     --batch_size 32 \
@@ -70,6 +71,7 @@ uv run python -m scripts.train_model \
     --dataset_dir data/blocks_4 \
     --dataset_split_dir data/blocks_4 \
     --num_blocks 4 \
+    --encoding_type binary \ # Specify the encoding: 'binary' or 'sas'
     --output_dir ./training_outputs \
     --epochs 200 \
     --batch_size 32 \
@@ -96,6 +98,7 @@ uv run python -m scripts.benchmark \
     --num_blocks 4 \
     --model_type ttm \
     --model_path ./training_outputs/ttm_N4/final_model_assets \
+    --encoding_type binary \ # Must match the encoding the model was trained on
     --output_dir ./benchmark_results \
     --max_plan_length 60 \
     --save_detailed_results
@@ -110,6 +113,7 @@ uv run python -m scripts.benchmark \
     --num_blocks 4 \
     --model_type lstm \
     --model_path ./training_outputs/lstm_N4/pats_lstm_model_N4.pth \
+    --encoding_type binary \ # Must match the encoding the model was trained on
     --output_dir ./benchmark_results \
     --max_plan_length 60 \
     --save_detailed_results

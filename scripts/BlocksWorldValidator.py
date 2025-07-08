@@ -28,32 +28,42 @@ class ValidationResult:
 
 
 class BlocksWorldValidator:
-    def __init__(self, num_blocks: int, predicate_manifest_file: str | Path):
-        """Initialize validator for a specific number of blocks using a predicate manifest."""
+    def __init__(self, num_blocks: int, encoding_type: str, predicate_manifest_file: Optional[str | Path] = None):
+        """
+        Initialize validator for a specific number of blocks and encoding type.
+
+        :param num_blocks: The number of blocks in the domain.
+        :param encoding_type: The encoding type, either 'binary' or 'sas'.
+        :param predicate_manifest_file: Path to the predicate manifest. Required for 'binary' encoding.
+        """
         self.num_blocks = num_blocks
-        self.predicate_manifest_file = Path(predicate_manifest_file)
+        self.encoding_type = encoding_type
+        self.block_names: List[str] = [f"b{i + 1}" for i in range(self.num_blocks)]
 
-        # These will be populated by _setup_feature_indices
-        self.predicate_list: List[str] = []
-        self.state_size: int = 0
-        self.block_names: List[str] = []  # e.g., ["b1", "b2", "b3"]
+        if self.encoding_type == "binary":
+            if predicate_manifest_file is None:
+                raise ValueError("predicate_manifest_file is required for 'binary' encoding.")
+            self.predicate_manifest_file = Path(predicate_manifest_file)
+            # These will be populated by _setup_feature_indices_binary
+            self.predicate_list: List[str] = []
+            self.on_table_indices: Dict[str, int] = {}
+            self.on_block_indices: Dict[Tuple[str, str], int] = {}
+            self.clear_indices: Dict[str, int] = {}
+            self.held_indices: Dict[str, int] = {}
+            self.arm_empty_index: Optional[int] = None
+            self._on_table_idx_list: List[int] = []
+            self._on_block_idx_list: List[int] = []
+            self._clear_idx_list: List[int] = []
+            self._held_idx_list: List[int] = []
+            self._setup_feature_indices_binary()
+            self.state_size = len(self.predicate_list)
+        elif self.encoding_type == "sas":
+            self.state_size = self.num_blocks
+        else:
+            raise ValueError(f"Unsupported encoding_type: {encoding_type}")
 
-        self.on_table_indices: Dict[str, int] = {}
-        self.on_block_indices: Dict[Tuple[str, str], int] = {}
-        self.clear_indices: Dict[str, int] = {}
-        self.held_indices: Dict[str, int] = {}
-        self.arm_empty_index: Optional[int] = None
-
-        # Store indices as lists for easier tensor gathering
-        self._on_table_idx_list: List[int] = []
-        self._on_block_idx_list: List[int] = []
-        self._clear_idx_list: List[int] = []
-        self._held_idx_list: List[int] = []
-
-        self._setup_feature_indices()
-
-    def _setup_feature_indices(self):
-        """Calculate indices for different features in the state vector by reading the manifest."""
+    def _setup_feature_indices_binary(self):
+        """Calculate indices for binary predicate encoding."""
         if not self.predicate_manifest_file.is_file():
             raise FileNotFoundError(f"Predicate manifest file not found: {self.predicate_manifest_file}")
 
@@ -119,6 +129,17 @@ class BlocksWorldValidator:
             raise ValueError("(arm-empty) predicate not found in manifest. This is required.")
 
     def calculate_constraint_violation_loss(self, state_logits: torch.Tensor) -> torch.Tensor:
+        """Dispatch to the correct loss function based on encoding."""
+        if self.encoding_type == "binary":
+            return self._calculate_constraint_violation_loss_binary(state_logits)
+        elif self.encoding_type == "sas":
+            # NOTE: A differentiable loss for SAS+ is non-trivial as the values are discrete and interdependent.
+            # A proper implementation might use a cross-entropy loss over possible locations for each block.
+            # For now, we return zero loss, effectively disabling this feature for SAS+.
+            return torch.tensor(0.0, device=state_logits.device)
+        return torch.tensor(0.0, device=state_logits.device)
+
+    def _calculate_constraint_violation_loss_binary(self, state_logits: torch.Tensor) -> torch.Tensor:
         """
         Calculates a differentiable loss term based on physical constraint violations.
         Operates on a batch of state logits from the model.
@@ -182,6 +203,14 @@ class BlocksWorldValidator:
         return total_loss / num_states if num_states > 0 else torch.tensor(0.0)
 
     def _check_physical_constraints(self, state: List[int] | np.ndarray) -> Tuple[bool, List[Violation]]:
+        """Dispatch to the correct physical constraint checker based on encoding."""
+        if self.encoding_type == "binary":
+            return self._check_physical_constraints_binary(state)
+        elif self.encoding_type == "sas":
+            return self._check_physical_constraints_sas(state)
+        return False, [Violation("INTERNAL_ERROR", "Unknown encoding type in validator.")]
+
+    def _check_physical_constraints_binary(self, state: List[int] | np.ndarray) -> Tuple[bool, List[Violation]]:
         """Check if state satisfies basic physical constraints"""
         violations: List[Violation] = []
         state_arr = np.array(state) if not isinstance(state, np.ndarray) else state
@@ -280,7 +309,85 @@ class BlocksWorldValidator:
 
         return len(violations) == 0, violations
 
+    def _check_physical_constraints_sas(self, state: List[int] | np.ndarray) -> Tuple[bool, List[Violation]]:
+        """Checks physical constraints for a SAS+ encoded state vector."""
+        violations: List[Violation] = []
+        state_arr = np.array(state, dtype=int) if not isinstance(state, np.ndarray) else state.astype(int)
+
+        if len(state_arr) != self.state_size:
+            violations.append(
+                Violation("STATE_INVALID_SIZE", f"Invalid state size: expected {self.state_size}, got {len(state_arr)}")
+            )
+            return False, violations
+
+        # 1. Check for multiple held blocks
+        held_indices = np.where(state_arr == -1)[0]
+        if len(held_indices) > 1:
+            held_blocks = [self.block_names[i] for i in held_indices]
+            violations.append(
+                Violation(
+                    "PHYS_ARM_MULTI_HOLD", f"Arm is holding multiple blocks: {held_blocks}", {"held_blocks": held_blocks}
+                )
+            )
+
+        # 2. Check for invalid positions and build a "support" dictionary
+        support_map = {}  # key=block_idx, value=supported_by_idx (0 for table, -1 for arm)
+        for i, pos in enumerate(state_arr):
+            if pos > self.num_blocks or pos < -1:
+                violations.append(
+                    Violation("PHYS_INVALID_POS", f"Block {self.block_names[i]} has invalid position value {pos}")
+                )
+            if pos == i + 1:
+                violations.append(Violation("PHYS_SELF_SUPPORT", f"Block {self.block_names[i]} cannot be on itself."))
+            if pos > 0:  # on another block
+                support_map[i] = pos - 1  # store 0-based index of supporter
+            elif pos == 0:  # on table
+                support_map[i] = "table"
+            elif pos == -1:  # held
+                support_map[i] = "arm"
+
+        # 3. Check for support cycles (e.g., b1 on b2, b2 on b1)
+        for block_idx in range(self.num_blocks):
+            path = [block_idx]
+            curr = block_idx
+            while curr in support_map and support_map[curr] not in ["table", "arm"]:
+                curr = support_map[curr]
+                if curr in path:
+                    cycle_names = [self.block_names[p] for p in path] + [self.block_names[curr]]
+                    violations.append(
+                        Violation("PHYS_SUPPORT_CYCLE", f"Support cycle detected: {' -> '.join(cycle_names)}")
+                    )
+                    break  # Found a cycle, break inner while
+                path.append(curr)
+
+        # 4. Check for multiple blocks on the same support
+        on_top_of = {}  # key=supporter_idx, value=list of blocks on top
+        for i, pos in enumerate(state_arr):
+            if pos > 0:  # on another block
+                supporter_idx = pos - 1
+                if supporter_idx not in on_top_of:
+                    on_top_of[supporter_idx] = []
+                on_top_of[supporter_idx].append(i)
+
+        for supporter_idx, blocks_on_top in on_top_of.items():
+            if len(blocks_on_top) > 1:
+                supporter_name = self.block_names[supporter_idx]
+                block_names_on_top = [self.block_names[b] for b in blocks_on_top]
+                violations.append(
+                    Violation("PHYS_MULTI_ON_TOP", f"Multiple blocks ({block_names_on_top}) on top of {supporter_name}")
+                )
+
+        return len(violations) == 0, violations
+
     def _check_legal_transition(self, state1: np.ndarray, state2: np.ndarray) -> Tuple[bool, List[Violation]]:
+        """Dispatch to the correct transition checker based on encoding."""
+        if self.encoding_type == "binary":
+            return self._check_legal_transition_binary(state1, state2)
+        elif self.encoding_type == "sas":
+            return self._check_legal_transition_sas(state1, state2)
+        return False, [Violation("INTERNAL_ERROR", "Unknown encoding type in validator.")]
+
+    def _check_legal_transition_binary(self, state1: np.ndarray, state2: np.ndarray) -> Tuple[bool, List[Violation]]:
         """Check if transition between states is legal according to blocks world rules.
         Assumes state1 and state2 are individually physically valid."""
         violations: List[Violation] = []
@@ -304,6 +411,32 @@ class BlocksWorldValidator:
                     {"diff_count": int(differences)},
                 )
             )
+
+        return len(violations) == 0, violations
+
+    def _check_legal_transition_sas(self, state1: np.ndarray, state2: np.ndarray) -> Tuple[bool, List[Violation]]:
+        """Checks if transition between SAS+ states is legal."""
+        violations: List[Violation] = []
+        s1 = np.array(state1, dtype=int)
+        s2 = np.array(state2, dtype=int)
+
+        diff_indices = np.where(s1 != s2)[0]
+        differences = len(diff_indices)
+
+        if differences == 0:
+            violations.append(Violation("TRANS_NO_CHANGE", "No change between states", {"diff_count": 0}))
+        # A valid action (pickup, putdown, stack, unstack) changes the position of exactly ONE block.
+        elif differences != 1:
+            changed_blocks = [self.block_names[i] for i in diff_indices]
+            violations.append(
+                Violation(
+                    "TRANS_ILLEGAL_CHANGES",
+                    f"Illegal number of changes ({differences}). Expected 1 block to change position. Changed: {changed_blocks}",
+                    {"diff_count": int(differences), "changed_blocks": changed_blocks},
+                )
+            )
+        # Further checks could be added here to validate the specific change (e.g., was the moved block clear in s1?)
+        # but for now, checking the number of changes is a strong heuristic.
 
         return len(violations) == 0, violations
 

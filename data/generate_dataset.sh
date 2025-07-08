@@ -39,6 +39,9 @@ FD_TIMEOUT="60s"
 # Common ones: "astar(lmcut())", "astar(ipdb())", "astar(blind())"
 FD_SEARCH_CONFIG="astar(lmcut())"
 
+# ENCODING_TYPE: The state encoding to use. Options: "binary", "sas"
+ENCODING_TYPE="sas"
+
 # Helper Script Check
 if [ ! -f "$PARSER_ENCODER_SCRIPT" ]; then
     echo "Error: Parser/Encoder script '$PARSER_ENCODER_SCRIPT' not found."
@@ -155,17 +158,17 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
         fi
 
         # 4. Parse VAL output, PDDL, encode states, and save trajectory
-        # The Python script will handle reading PDDL for init/goal, VAL output for deltas, then encoding and saving.
-        echo "    Encoding trajectory for $PROBLEM_BASENAME..."
+        echo "    Encoding trajectory for $PROBLEM_BASENAME using '$ENCODING_TYPE' encoding..."
         uv run python "$PARSER_ENCODER_SCRIPT" \
             --val_output_file "$VAL_OUTPUT_FILE" \
             --pddl_domain_file "$DOMAIN_FILE" \
             --pddl_problem_file "$PDDL_FILE" \
             --num_blocks "$num_blocks" \
+            --encoding_type "$ENCODING_TYPE" \
             --text_trajectory_output "$TEXT_TRAJECTORY_FILE" \
             --binary_trajectory_output "$BINARY_TRAJECTORY_FILE" \
             --binary_goal_output "$GOAL_BINARY_FILE" \
-            --manifest_output_dir "$BLOCK_SPECIFIC_DATA_DIR" # Manifest goes into blocks_N dir
+            --manifest_output_dir "$BLOCK_SPECIFIC_DATA_DIR" # Manifest/info goes into blocks_N dir
         
         if [ $? -ne 0 ]; then
             echo "    ERROR: Parsing/Encoding failed for $PROBLEM_BASENAME"

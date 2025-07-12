@@ -18,12 +18,13 @@ hostname
 echo "Python version: $(python --version)"
 
 model_type='lstm'
+encoding='sas'
 num_blocks=4
 
 # Generate timestamp and build unique dirs/paths
 timestamp=$(date +%Y%m%d_%H%M%S)
-output_dir="./training_outputs/${model_type}_${timestamp}"
-benchmark_output_dir="./benchmark_results/${model_type}_${timestamp}"
+output_dir="./training_outputs_${encoding}/${model_type}_${timestamp}"
+benchmark_output_dir="./benchmark_results_${encoding}/${model_type}_${timestamp}"
 
 if [ "$model_type" = 'lstm' ]; then
     echo "Using LSTM model"
@@ -43,16 +44,15 @@ echo -e "\n"
 echo "Starting training with model: $model_type"
 python -m scripts.train_model \
     --model_type $model_type \
-    --dataset_dir data/blocks_4 \
-    --dataset_split_dir data/blocks_4 \
+    --dataset_dir data/blocks_4-sas \
+    --dataset_split_dir data/blocks_4-sas \
     --num_blocks $num_blocks \
+    --encoding_type sas \
     --output_dir $output_dir \
     --epochs 400 \
     --batch_size 32 \
     --learning_rate 0.001 \
     --seed 13 \
-    --use_constraint_loss \
-    --constraint_loss_weight 1.0
 
 echo -e "\n"
 echo "Training completed. Outputs in $output_dir"

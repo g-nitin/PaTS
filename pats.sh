@@ -18,8 +18,9 @@ hostname
 echo "Python version: $(python --version)"
 
 model_type='lstm'
-encoding='sas'
 num_blocks=4
+encoding='sas'
+dataset_dir="data/blocks_${num_blocks}-${encoding}"
 
 # Generate timestamp and build unique dirs/paths
 timestamp=$(date +%Y%m%d_%H%M%S)
@@ -41,7 +42,6 @@ mkdir -p "$output_dir"
 mkdir -p "$benchmark_output_dir"
 
 echo -e "\n"
-echo "Starting training with model: $model_type"
 python -m scripts.train_model \
     --model_type $model_type \
     --dataset_dir data/blocks_4-sas \
@@ -60,7 +60,7 @@ echo "Training completed. Outputs in $output_dir"
 echo -e "\n"
 echo "Starting benchmarking with model: $model_type"
 python -m scripts.benchmark \
-    --dataset_dir ./data \
+    --dataset_dir data \
     --num_blocks $num_blocks \
     --model_type $model_type \
     --model_path $model_path \

@@ -42,8 +42,8 @@ The typical workflow for using PaTS is:
     - This script requires the path to the dataset, the number of blocks, model type, path to the trained model, and an output directory.
     - Example:
       ```bash
-      uv run python scripts/benchmark.py \
-          --dataset_dir ./data \
+      uv run python -m scripts.benchmark.py \
+          --dataset_dir data/blocks_4 \
           --num_blocks 4 \
           --model_type ttm \ # or lstm
           --model_path ./training_outputs/ttm_N4/final_model_assets \ # Adjust path based on actual saved model

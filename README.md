@@ -94,7 +94,7 @@ This will train an LSTM model and save its checkpoint (`.pth`) into `./training_
 ```bash
 # From the project root directory
 uv run python -m scripts.benchmark \
-    --dataset_dir ./data \
+    --dataset_dir data/blocks_4 \
     --num_blocks 4 \
     --model_type ttm \
     --model_path ./training_outputs/ttm_N4/final_model_assets \
@@ -109,7 +109,7 @@ uv run python -m scripts.benchmark \
 ```bash
 # From the project root directory
 uv run python -m scripts.benchmark \
-    --dataset_dir ./data \
+    --dataset_dir data/blocks_4 \
     --num_blocks 4 \
     --model_type lstm \
     --model_path ./training_outputs/lstm_N4/pats_lstm_model_N4.pth \

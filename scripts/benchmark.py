@@ -418,17 +418,16 @@ def run_benchmark(args: argparse.Namespace):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Construct paths based on num_blocks
-    block_specific_data_dir = data_root_dir / f"blocks_{num_blocks}"
-    if not block_specific_data_dir.exists():
-        print(f"ERROR: Block-specific data directory not found: {block_specific_data_dir}")
+    if not data_root_dir.exists():
+        print(f"ERROR: Block-specific data directory not found: {data_root_dir}")
         return
 
-    predicate_manifest_file = block_specific_data_dir / f"predicate_manifest_{num_blocks}.txt"
+    predicate_manifest_file = data_root_dir / f"predicate_manifest_{num_blocks}.txt"
     if not predicate_manifest_file.exists():
         print(f"ERROR: Predicate manifest file not found: {predicate_manifest_file}")
         return
 
-    test_split_file = block_specific_data_dir / "test_files.txt"
+    test_split_file = data_root_dir / "test_files.txt"
     problem_basenames = load_problem_basenames_from_split_file(test_split_file)
     if not problem_basenames:
         print(f"No test problems found in {test_split_file}. Exiting.")
@@ -439,7 +438,7 @@ def run_benchmark(args: argparse.Namespace):
     # Initialize Validator
     print(f"Initializing validator for N={num_blocks} with '{args.encoding_type}' encoding.")
     if args.encoding_type == "binary":
-        predicate_manifest_file = block_specific_data_dir / f"predicate_manifest_{num_blocks}.txt"
+        predicate_manifest_file = data_root_dir / f"predicate_manifest_{num_blocks}.txt"
         if not predicate_manifest_file.exists():
             print(f"ERROR: Predicate manifest file not found: {predicate_manifest_file}")
             return
@@ -485,8 +484,8 @@ def run_benchmark(args: argparse.Namespace):
     for i, basename in enumerate(problem_basenames):
         print(f"  Processing problem {i + 1}/{len(problem_basenames)}: {basename} ...", end="", flush=True)
 
-        traj_bin_path = block_specific_data_dir / "trajectories_bin" / f"{basename}.traj.{args.encoding_type}.npy"
-        goal_bin_path = block_specific_data_dir / "trajectories_bin" / f"{basename}.goal.{args.encoding_type}.npy"
+        traj_bin_path = data_root_dir / "trajectories_bin" / f"{basename}.traj.{args.encoding_type}.npy"
+        goal_bin_path = data_root_dir / "trajectories_bin" / f"{basename}.goal.{args.encoding_type}.npy"
 
         if not traj_bin_path.exists() or not goal_bin_path.exists():
             print(" skipped (data files missing).")
@@ -579,7 +578,7 @@ def run_benchmark(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PaTS Model Benchmarking Script")
     parser.add_argument(
-        "--dataset_dir", type=str, required=True, help="Root directory of the PaTS dataset (e.g., './data')"
+        "--dataset_dir", type=str, required=True, help="Directory of the PaTS dataset (e.g., 'data/blocks_4')"
     )
     parser.add_argument("--num_blocks", type=int, required=True, help="Number of blocks for the problems to benchmark.")
     parser.add_argument(

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ROOT_DIR: Base directory for all planning related tools and files
-ROOT_DIR="$HOME/usc/aiisc/libraries/planning/"
+ROOT_DIR="$HOME/usc/ai4s/libraries/planning/"
 
 # DOMAIN_FILE: Path to the PDDL domain file (e.g., blocksworld domain)
 DOMAIN_FILE="${ROOT_DIR}pddl-generators/blocksworld/4ops/domain.pddl"
@@ -23,7 +23,7 @@ PARSER_ENCODER_SCRIPT="./data/parse_and_encode.py"
 ANALYZE_AND_SPLIT_SCRIPT="./data/analyze_dataset_splits.py"
 
 # OUTPUT_DIR: Directory to store generated PDDL problems, plans, VAL outputs, and final trajectories
-OUTPUT_DIR="./data"
+OUTPUT_DIR="./data-sas"
 
 # MIN_BLOCKS & MAX_BLOCKS: Range of block numbers for problem generation
 MIN_BLOCKS_TO_GENERATE=4

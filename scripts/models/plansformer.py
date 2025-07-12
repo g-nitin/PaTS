@@ -19,7 +19,7 @@ from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 NUM_RUNS = 3  # Number of times to run the evaluation
 BASE_SEED = 13  # Base seed for reproducibility
 
-PLANNING_DIR = Path("/Users", "nitingupta", "usc", "aiisc", "libraries", "planning")
+PLANNING_DIR = Path("/Users", "nitingupta", "usc", "ai4s", "libraries", "planning")
 
 MODEL_PATH = PLANNING_DIR / "plansformer_v3" / "model_files"
 DOMAIN_FILE_PATH = PLANNING_DIR / "blocksworld_domain.pddl"

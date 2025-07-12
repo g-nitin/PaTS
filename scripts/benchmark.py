@@ -422,11 +422,6 @@ def run_benchmark(args: argparse.Namespace):
         print(f"ERROR: Block-specific data directory not found: {data_root_dir}")
         return
 
-    predicate_manifest_file = data_root_dir / f"predicate_manifest_{num_blocks}.txt"
-    if not predicate_manifest_file.exists():
-        print(f"ERROR: Predicate manifest file not found: {predicate_manifest_file}")
-        return
-
     test_split_file = data_root_dir / "test_files.txt"
     problem_basenames = load_problem_basenames_from_split_file(test_split_file)
     if not problem_basenames:
@@ -437,14 +432,28 @@ def run_benchmark(args: argparse.Namespace):
 
     # Initialize Validator
     print(f"Initializing validator for N={num_blocks} with '{args.encoding_type}' encoding.")
+
+    validator = None
     if args.encoding_type == "binary":
+        # Construct the path to the predicate manifest for the specific num_blocks
         predicate_manifest_file = data_root_dir / f"predicate_manifest_{num_blocks}.txt"
         if not predicate_manifest_file.exists():
             print(f"ERROR: Predicate manifest file not found: {predicate_manifest_file}")
             return
-        validator = BlocksWorldValidator(num_blocks, args.encoding_type, predicate_manifest_file=predicate_manifest_file)
+        try:
+            validator = BlocksWorldValidator(num_blocks, args.encoding_type, predicate_manifest_file=predicate_manifest_file)
+            print(f"Validator initialized with state_size={validator.state_size}.")
+        except Exception as e:
+            print(f"ERROR: Failed to initialize BlocksWorldValidator for binary encoding: {e}")
+            return
     elif args.encoding_type == "sas":
-        validator = BlocksWorldValidator(num_blocks, args.encoding_type)
+        try:
+            # SAS encoding does not require a predicate manifest file.
+            validator = BlocksWorldValidator(num_blocks, args.encoding_type)
+            print(f"Validator initialized with state_size={validator.state_size}.")
+        except Exception as e:
+            print(f"ERROR: Failed to initialize BlocksWorldValidator for SAS encoding: {e}")
+            return
     else:
         print(f"ERROR: Unknown encoding type '{args.encoding_type}'")
         return
@@ -466,7 +475,7 @@ def run_benchmark(args: argparse.Namespace):
     if wrapped_model.state_dim != validator.state_size:
         print("CRITICAL ERROR: State dimension mismatch!")
         print(f"  Model ({wrapped_model.model_name}) expects/produces state_dim = {wrapped_model.state_dim}")
-        print(f"  Validator (from manifest {predicate_manifest_file}) expects state_size = {validator.state_size}")
+        print(f"  Validator (from manifest/config) expects state_size = {validator.state_size}")
         print("  Ensure the model was trained with data generated using this manifest or an equivalent encoding.")
         return
 

@@ -23,7 +23,8 @@ encoding='sas'
 dataset_dir="data/blocks_${num_blocks}-${encoding}"
 
 # Generate timestamp and build unique dirs/paths
-timestamp=$(date +%Y%m%d_%H%M%S)
+timestamp='20250711_203405'
+
 output_dir="./training_outputs_${encoding}/${model_type}_${timestamp}"
 benchmark_output_dir="./benchmark_results_${encoding}/${model_type}_${timestamp}"
 
@@ -40,22 +41,6 @@ fi
 
 mkdir -p "$output_dir"
 mkdir -p "$benchmark_output_dir"
-
-echo -e "\n"
-python -m scripts.train_model \
-    --model_type $model_type \
-    --dataset_dir $dataset_dir \
-    --dataset_split_dir $dataset_dir \
-    --num_blocks $num_blocks \
-    --encoding_type sas \
-    --output_dir $output_dir \
-    --epochs 400 \
-    --batch_size 32 \
-    --learning_rate 0.001 \
-    --seed 13 \
-
-echo -e "\n"
-echo "Training completed. Outputs in $output_dir"
 
 echo -e "\n"
 echo "Starting benchmarking with model: $model_type"

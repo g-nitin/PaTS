@@ -5,7 +5,7 @@ import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path, PosixPath
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -25,8 +25,30 @@ from ..pats_dataset import PaTSDataset
 
 # ** Constants **
 DEFAULT_TTM_MODEL_PATH = "ibm-granite/granite-timeseries-ttm-r2"  # Default TTM model
-SUPPORTED_CONTEXT_LENGTHS = [52, 90, 180, 360, 520, 1024, 1536]
-SUPPORTED_PREDICTION_LENGTHS = [16, 30, 48, 60, 96, 192, 336, 720]
+# Define the supported models based on the provided combinations: https://huggingface.co/ibm-granite/granite-timeseries-ttm-r2/tree/main
+SUPPORTED_MODELS = [
+    {"context_length": 52, "prediction_length": 16, "freq_tuning": True, "loss_metric": "mse", "release": "r2.1"},
+    {"context_length": 52, "prediction_length": 16, "freq_tuning": True, "loss_metric": "mae", "release": "r2.1"},
+    {"context_length": 90, "prediction_length": 30, "freq_tuning": True, "loss_metric": "mse", "release": "r2.1"},
+    {"context_length": 90, "prediction_length": 30, "freq_tuning": True, "loss_metric": "mae", "release": "r2.1"},
+    {"context_length": 180, "prediction_length": 60, "freq_tuning": True, "loss_metric": "mae", "release": "r2.1"},
+    {"context_length": 360, "prediction_length": 60, "freq_tuning": True, "loss_metric": "mae", "release": "r2.1"},
+    {"context_length": 1024, "prediction_length": 96, "freq_tuning": False, "loss_metric": "mse", "release": "r2"},
+    {"context_length": 1024, "prediction_length": 192, "freq_tuning": False, "loss_metric": "mse", "release": "r2"},
+    {"context_length": 1024, "prediction_length": 336, "freq_tuning": False, "loss_metric": "mse", "release": "r2"},
+    {"context_length": 1024, "prediction_length": 720, "freq_tuning": False, "loss_metric": "mse", "release": "r2"},
+    {"context_length": 512, "prediction_length": 48, "freq_tuning": True, "loss_metric": "mse", "release": "r2.1"},
+    {"context_length": 512, "prediction_length": 48, "freq_tuning": True, "loss_metric": "mae", "release": "r2.1"},
+    {"context_length": 512, "prediction_length": 96, "freq_tuning": True, "loss_metric": "mse", "release": "r2.1"},
+    {"context_length": 512, "prediction_length": 96, "freq_tuning": True, "loss_metric": "mae", "release": "r2.1"},
+    {"context_length": 512, "prediction_length": 192, "freq_tuning": False, "loss_metric": "mse", "release": "r2"},
+    {"context_length": 512, "prediction_length": 336, "freq_tuning": False, "loss_metric": "mse", "release": "r2"},
+    {"context_length": 512, "prediction_length": 720, "freq_tuning": False, "loss_metric": "mse", "release": "r2"},
+    {"context_length": 1536, "prediction_length": 96, "freq_tuning": False, "loss_metric": "mse", "release": "r2"},
+    {"context_length": 1536, "prediction_length": 192, "freq_tuning": False, "loss_metric": "mse", "release": "r2"},
+    {"context_length": 1536, "prediction_length": 336, "freq_tuning": False, "loss_metric": "mse", "release": "r2"},
+    {"context_length": 1536, "prediction_length": 720, "freq_tuning": False, "loss_metric": "mse", "release": "r2"},
+]
 
 global DEVICE
 DEVICE: torch.device
@@ -428,41 +450,96 @@ def load_problem_basenames_from_split_file(split_file_path: Path) -> List[str]:
     return basenames
 
 
-def determine_ttm_lengths(
+def get_model_path(model_config: Dict[str, Union[int, bool, str]]) -> str:
+    """Constructs the model path from its configuration."""
+    parts = ["ibm-granite/granite-timeseries-ttm-r2"]  # Base path
+    config_str = f"{model_config['context_length']}-{model_config['prediction_length']}"
+    if model_config["freq_tuning"]:
+        config_str += "-ft"
+    if model_config["loss_metric"] == "mae":
+        # Note: Using 'l1' as it appears in the user-provided list.
+        config_str += "-l1"
+    config_str += f"-{model_config['release']}"
+    return f"{parts[0]}/{config_str}"
+
+
+def determine_ttm_model(
     max_plan_length: int,
     recommended_prediction_length: int,
     user_context_length: Optional[int] = None,
     user_prediction_length: Optional[int] = None,
-) -> Tuple[int, int]:
-    # First, find the context length
-    final_context_length = user_context_length
-    valid_cls = [cl for cl in SUPPORTED_CONTEXT_LENGTHS if cl <= max_plan_length]
-    if valid_cls:
-        final_context_length = max(valid_cls)
-    else:
-        final_context_length = min(SUPPORTED_CONTEXT_LENGTHS)
-        logger.warning(
-            f"Max plan length ({max_plan_length}) is smaller than all supported context lengths. "
-            f"Choosing the smallest supported: {final_context_length}."
-        )
-    logger.info(f"Max plan length: {max_plan_length} | Auto-selected context_length: {final_context_length}")
+    user_freq_tuning: Optional[bool] = None,
+    user_loss_metric: Optional[str] = None,
+    user_release: Optional[str] = None,
+) -> Optional[Dict[str, Union[int, bool, str]]]:
+    """
+    Determines the optimal TTM model based on constraints and user preferences.
+    """
+    candidates = SUPPORTED_MODELS
 
-    # Secondly, find the prediction length
-    final_prediction_length = user_prediction_length
-    valid_fls = [fl for fl in SUPPORTED_PREDICTION_LENGTHS if fl <= recommended_prediction_length]
-    if valid_fls:
-        final_prediction_length = max(valid_fls)
+    # 1. Filter based on user overrides
+    if user_context_length is not None:
+        candidates = [m for m in candidates if m["context_length"] == user_context_length]
+    if user_prediction_length is not None:
+        candidates = [m for m in candidates if m["prediction_length"] == user_prediction_length]
+    if user_freq_tuning is not None:
+        candidates = [m for m in candidates if m["freq_tuning"] == user_freq_tuning]
+    if user_loss_metric is not None:
+        candidates = [m for m in candidates if m["loss_metric"] == user_loss_metric]
+    if user_release is not None:
+        candidates = [m for m in candidates if m["release"] == user_release]
+
+    if not candidates:
+        logger.warning("No models match the specified user overrides.")
+        return None
+
+    # 2. Filter by max_plan_length
+    valid_candidates = [m for m in candidates if m["context_length"] <= max_plan_length]
+    if not valid_candidates:
+        min_supported_cl = min(m["context_length"] for m in candidates)
+        logger.warning(
+            f"Max plan length ({max_plan_length}) is smaller than all supported context lengths for the current selection. "
+            f"Considering models with the smallest supported context length: {min_supported_cl}."
+        )
+        # Relax the constraint to the smallest possible context length among the candidates
+        valid_candidates = [m for m in candidates if m["context_length"] == min_supported_cl]
+
+    # 3. Find the best prediction_length
+    # Find models with prediction length <= recommended
+    pl_candidates = [m for m in valid_candidates if m["prediction_length"] <= recommended_prediction_length]
+
+    if pl_candidates:
+        # If there are such models, find the largest prediction length among them
+        best_pl = max(m["prediction_length"] for m in pl_candidates)
+        final_candidates = [m for m in pl_candidates if m["prediction_length"] == best_pl]
     else:
-        final_prediction_length = min(SUPPORTED_PREDICTION_LENGTHS)
+        # Otherwise, choose the smallest available prediction length
+        best_pl = min(m["prediction_length"] for m in valid_candidates)
         logger.warning(
             f"Recommended prediction length ({recommended_prediction_length}) is smaller than all supported forecast lengths. "
-            f"Choosing the smallest supported: {final_prediction_length}."
+            f"Choosing the smallest supported: {best_pl}."
         )
+        final_candidates = [m for m in valid_candidates if m["prediction_length"] == best_pl]
+
     logger.info(
-        f"Recommended prediction length: {recommended_prediction_length} | Auto-selected prediction_length: {final_prediction_length}"
+        f"Recommended prediction length: {recommended_prediction_length} | Auto-selected prediction_length: {best_pl}"
     )
 
-    return final_context_length, final_prediction_length
+    # 4. Select the one with the largest context_length from the finalists
+    best_cl = max(m["context_length"] for m in final_candidates)
+    final_candidates = [m for m in final_candidates if m["context_length"] == best_cl]
+    logger.info(f"Max plan length: {max_plan_length} | Auto-selected context_length: {best_cl}")
+
+    # 5. Tie-break if multiple models remain
+    # Sort by: freq_tuning (True first), loss_metric ('mae' first), release (e.g., 'r2.1' > 'r2')
+    final_candidates.sort(key=lambda m: (not m["freq_tuning"], m["loss_metric"] != "mae", m["release"]), reverse=True)
+
+    selected_model = final_candidates[0]
+
+    logger.info(f"Selected model configuration: {selected_model}")
+    logger.info(f"Model path: {get_model_path(selected_model)}")
+
+    return selected_model
 
 
 def get_num_blocks_from_filename(filename_base: str) -> Optional[int]:

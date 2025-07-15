@@ -5,6 +5,7 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 from pprint import pprint
+from typing import Dict
 
 import numpy as np
 import torch
@@ -399,11 +400,16 @@ def main():
 
         print(f"Max plan length in training data for N={args.num_blocks}: {max_plan_len_in_train_data}")
 
-        auto_context_length, auto_prediction_length = determine_ttm_lengths(
+        final_candidate: Dict = determine_ttm_lengths(
             max_plan_length=max_plan_len_in_train_data if max_plan_len_in_train_data > 0 else 60,
             recommended_prediction_length=(max_plan_len_in_train_data + 2) if max_plan_len_in_train_data > 0 else 60,
             user_context_length=args.context_length,
             user_prediction_length=args.prediction_length,
+        )
+
+        auto_context_length, auto_prediction_length = (
+            final_candidate["context_length"],
+            final_candidate["prediction_length"],
         )
 
         ttm_model_config = TTMModelConfig(

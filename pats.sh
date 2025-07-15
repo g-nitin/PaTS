@@ -17,7 +17,7 @@ echo $CONDA_DEFAULT_ENV
 hostname
 echo "Python version: $(python --version)"
 
-model_type='lstm'
+model_type='ttm'
 num_blocks=4
 encoding='sas'
 dataset_dir="data/blocks_${num_blocks}-${encoding}"
@@ -47,7 +47,7 @@ python -m scripts.train_model \
     --dataset_dir $dataset_dir \
     --dataset_split_dir $dataset_dir \
     --num_blocks $num_blocks \
-    --encoding_type sas \
+    --encoding_type $encoding \
     --output_dir $output_dir \
     --epochs 400 \
     --batch_size 32 \

@@ -24,7 +24,7 @@ from tsfm_public.toolkit.get_model import get_model  # type: ignore
 from ..pats_dataset import PaTSDataset
 
 # ** Constants **
-DEFAULT_TTM_MODEL_PATH = "ibm-granite/granite-timeseries-ttm-r2"  # Default TTM model
+DEFAULT_TTM_MODEL_PATH = "ibm-granite/granite-timeseries-ttm-r2.1"  # Default TTM model
 # Define the supported models based on the provided combinations: https://huggingface.co/ibm-granite/granite-timeseries-ttm-r2/tree/main
 SUPPORTED_MODELS = [
     {"context_length": 52, "prediction_length": 16, "freq_tuning": True, "loss_metric": "mse", "release": "r2.1"},

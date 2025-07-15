@@ -65,6 +65,7 @@ python -m scripts.benchmark \
     --model_type $model_type \
     --model_path $model_path \
     --output_dir $benchmark_output_dir \
+    --encoding_type $encoding \
     --max_plan_length 60 \
     --save_detailed_results
 

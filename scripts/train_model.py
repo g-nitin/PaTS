@@ -5,7 +5,7 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 from pprint import pprint
-from typing import Dict
+from typing import cast
 
 import numpy as np
 import torch
@@ -16,7 +16,7 @@ from transformers.trainer_utils import set_seed as ttm_set_seed
 
 from scripts.BlocksWorldValidator import BlocksWorldValidator
 from scripts.models.lstm import PaTS_LSTM, lstm_collate_fn
-from scripts.models.ttm import BlocksWorldTTM, determine_ttm_lengths
+from scripts.models.ttm import BlocksWorldTTM, determine_ttm_model
 from scripts.models.ttm import ModelConfig as TTMModelConfig
 from scripts.models.ttm import setup_logging as ttm_setup_logging
 from scripts.pats_dataset import PaTSDataset
@@ -400,12 +400,14 @@ def main():
 
         print(f"Max plan length in training data for N={args.num_blocks}: {max_plan_len_in_train_data}")
 
-        final_candidate: Dict = determine_ttm_lengths(
+        final_candidate = determine_ttm_model(
             max_plan_length=max_plan_len_in_train_data if max_plan_len_in_train_data > 0 else 60,
             recommended_prediction_length=(max_plan_len_in_train_data + 2) if max_plan_len_in_train_data > 0 else 60,
             user_context_length=args.context_length,
             user_prediction_length=args.prediction_length,
         )
+
+        cast(dict, final_candidate)
 
         auto_context_length, auto_prediction_length = (
             final_candidate["context_length"],

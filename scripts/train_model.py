@@ -40,6 +40,7 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=10, factor=0.5)
 
     best_val_loss = float("inf")
+    sas_clamp_warning_issued = False
 
     for epoch in range(args.epochs):
         model.train()
@@ -55,6 +56,20 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
             lengths = batch_data["lengths"]
             # MLM mask is only relevant for binary encoding
             mlm_predicate_mask = batch_data.get("mlm_predicate_mask", torch.tensor([])).to(DEVICE)
+
+            # Safeguard for SAS+ encoding to prevent out-of-bounds embedding errors.
+            if args.encoding_type == "sas":
+                max_val = args.num_blocks
+                # Check if any values are out of the expected [0, max_val] range.
+                if not sas_clamp_warning_issued and (torch.any(input_seqs > max_val) or torch.any(goal_states > max_val)):
+                    warnings.warn(
+                        f"SAS+ input data contains values > num_blocks ({max_val}). "
+                        f"Clamping values to prevent embedding layer errors. "
+                        f"Please check your dataset for correctness."
+                    )
+                    sas_clamp_warning_issued = True
+                input_seqs.clamp_(min=0, max=max_val)
+                goal_states.clamp_(min=0, max=max_val)
 
             optimizer.zero_grad()
             # For SAS+, mlm_logits will be None
@@ -108,8 +123,7 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
                     loss_mlm = (loss_mlm_unreduced * mlm_predicate_mask).sum() / num_masked_elements
 
             loss_constraint = torch.tensor(0.0).to(DEVICE)
-            if args.encoding_type != "sas" and args.use_constraint_loss:
-                # The validator expects a 2D tensor of shape (num_states, num_features).
+            if args.encoding_type != "sas" and args.use_constraint_loss and validator is not None:
                 masked_logits = forecasting_logits[forecasting_mask[:, :, 0]]
                 if masked_logits.ndim == 2 and masked_logits.shape[0] > 0:
                     loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
@@ -137,64 +151,71 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
         epoch_val_loss, epoch_val_forecast_loss, epoch_val_mlm_loss, epoch_val_constraint_loss = 0.0, 0.0, 0.0, 0.0
         num_val_batches = 0
         with torch.no_grad():
-            for batch_data in val_loader:
-                if batch_data is None:
-                    continue
-                input_seqs = batch_data["input_sequences"].to(DEVICE)
-                goal_states = batch_data["goal_states"].to(DEVICE)
-                target_seqs = batch_data["target_sequences"].to(DEVICE)
-                lengths = batch_data["lengths"]
-                mlm_predicate_mask = batch_data.get("mlm_predicate_mask", torch.tensor([])).to(DEVICE)
-
-                forecasting_logits, mlm_logits, _ = model(input_seqs, goal_states, lengths)
-
-                # Identical loss calculation logic for validation
-                if args.encoding_type == "sas":
-                    mask = (
-                        torch.arange(max(lengths), device=DEVICE)[None, :] < torch.tensor(lengths, device=DEVICE)[:, None]
-                    )
-                    active_logits = forecasting_logits[mask]
-                    active_targets = target_seqs[mask]
-
-                    if active_targets.numel() == 0:
+            if val_loader is not None:
+                for batch_data in val_loader:
+                    if batch_data is None:
                         continue
+                    input_seqs = batch_data["input_sequences"].to(DEVICE)
+                    goal_states = batch_data["goal_states"].to(DEVICE)
+                    target_seqs = batch_data["target_sequences"].to(DEVICE)
+                    lengths = batch_data["lengths"]
+                    mlm_predicate_mask = batch_data.get("mlm_predicate_mask", torch.tensor([])).to(DEVICE)
 
-                    active_targets_indices = model._map_sas_to_indices(active_targets)
-                    loss_forecasting = criterion(
-                        active_logits.reshape(-1, model.num_locations), active_targets_indices.reshape(-1)
+                    if args.encoding_type == "sas":
+                        input_seqs.clamp_(min=0, max=args.num_blocks)
+                        goal_states.clamp_(min=0, max=args.num_blocks)
+
+                    forecasting_logits, mlm_logits, _ = model(input_seqs, goal_states, lengths)
+
+                    if args.encoding_type == "sas":
+                        mask = (
+                            torch.arange(max(lengths), device=DEVICE)[None, :]
+                            < torch.tensor(lengths, device=DEVICE)[:, None]
+                        )
+                        active_logits = forecasting_logits[mask]
+                        active_targets = target_seqs[mask]
+
+                        if active_targets.numel() == 0:
+                            continue
+
+                        active_targets_indices = model._map_sas_to_indices(active_targets)
+                        loss_forecasting = criterion(
+                            active_logits.reshape(-1, model.num_locations), active_targets_indices.reshape(-1)
+                        )
+                    else:  # Binary
+                        forecasting_mask = torch.zeros_like(target_seqs, dtype=torch.bool).to(DEVICE)
+                        for i, length_val in enumerate(lengths):
+                            if length_val > 0:
+                                forecasting_mask[i, :length_val, :] = True
+                        num_forecast_elements = forecasting_mask.float().sum()
+                        if num_forecast_elements == 0:
+                            continue
+                        loss_forecasting_unreduced = criterion(forecasting_logits, target_seqs)
+                        loss_forecasting = (
+                            loss_forecasting_unreduced * forecasting_mask.float()
+                        ).sum() / num_forecast_elements
+
+                    loss_mlm = torch.tensor(0.0).to(DEVICE)
+                    if args.encoding_type != "sas" and args.use_mlm_task and mlm_logits is not None:
+                        num_masked_elements = mlm_predicate_mask.sum()
+                        if num_masked_elements > 0:
+                            loss_mlm_unreduced = criterion(mlm_logits, input_seqs)
+                            loss_mlm = (loss_mlm_unreduced * mlm_predicate_mask).sum() / num_masked_elements
+
+                    loss_constraint = torch.tensor(0.0).to(DEVICE)
+                    if args.encoding_type != "sas" and args.use_constraint_loss and validator is not None:
+                        masked_logits = forecasting_logits[forecasting_mask[:, :, 0]]
+                        if masked_logits.ndim == 2 and masked_logits.shape[0] > 0:
+                            loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
+
+                    total_loss = (
+                        loss_forecasting + args.mlm_loss_weight * loss_mlm + args.constraint_loss_weight * loss_constraint
                     )
-                else:  # Binary
-                    forecasting_mask = torch.zeros_like(target_seqs, dtype=torch.bool).to(DEVICE)
-                    for i, length_val in enumerate(lengths):
-                        if length_val > 0:
-                            forecasting_mask[i, :length_val, :] = True
-                    num_forecast_elements = forecasting_mask.float().sum()
-                    if num_forecast_elements == 0:
-                        continue
-                    loss_forecasting_unreduced = criterion(forecasting_logits, target_seqs)
-                    loss_forecasting = (loss_forecasting_unreduced * forecasting_mask.float()).sum() / num_forecast_elements
-
-                loss_mlm = torch.tensor(0.0).to(DEVICE)
-                if args.encoding_type != "sas" and args.use_mlm_task and mlm_logits is not None:
-                    num_masked_elements = mlm_predicate_mask.sum()
-                    if num_masked_elements > 0:
-                        loss_mlm_unreduced = criterion(mlm_logits, input_seqs)
-                        loss_mlm = (loss_mlm_unreduced * mlm_predicate_mask).sum() / num_masked_elements
-
-                loss_constraint = torch.tensor(0.0).to(DEVICE)
-                if args.encoding_type != "sas" and args.use_constraint_loss:
-                    masked_logits = forecasting_logits[forecasting_mask[:, :, 0]]
-                    if masked_logits.ndim == 2 and masked_logits.shape[0] > 0:
-                        loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
-
-                total_loss = (
-                    loss_forecasting + args.mlm_loss_weight * loss_mlm + args.constraint_loss_weight * loss_constraint
-                )
-                epoch_val_loss += total_loss.item()
-                epoch_val_forecast_loss += loss_forecasting.item()
-                epoch_val_mlm_loss += loss_mlm.item()
-                epoch_val_constraint_loss += loss_constraint.item()
-                num_val_batches += 1
+                    epoch_val_loss += total_loss.item()
+                    epoch_val_forecast_loss += loss_forecasting.item()
+                    epoch_val_mlm_loss += loss_mlm.item()
+                    epoch_val_constraint_loss += loss_constraint.item()
+                    num_val_batches += 1
 
         avg_val_loss = epoch_val_loss / num_val_batches if num_val_batches > 0 else float("inf")
         avg_val_forecast_loss = epoch_val_forecast_loss / num_val_batches if num_val_batches > 0 else float("inf")

@@ -302,9 +302,9 @@ def main():
     parser.add_argument(
         "--encoding_type",
         type=str,
-        choices=["binary", "sas"],
-        default="binary",
-        help="The type of state encoding to use: 'binary' (predicate vector) or 'sas' (position vector).",
+        choices=["bin", "sas"],
+        default="bin",
+        help="The type of state encoding to use: 'bin' (predicate onehot vector) or 'sas' (position vector).",
     )
 
     args = parser.parse_args()
@@ -317,7 +317,7 @@ def main():
         block_names = [f"b{i + 1}" for i in range(args.num_blocks)]
 
         # 1. Generate encoding-specific information
-        if args.encoding_type == "binary":
+        if args.encoding_type == "bin":
             ordered_master_pred_list = get_ordered_predicate_list(args.num_blocks, block_names_prefix="b")
             if not ordered_master_pred_list:
                 print(f"ERROR: Could not generate master predicate list for {args.num_blocks} blocks.")
@@ -332,7 +332,7 @@ def main():
                     f_manifest.write(f"{pred_item}\n")
             print(f"    INFO: Predicate manifest saved to: {manifest_file_path}")
             encoding_info = {
-                "type": "binary",
+                "type": "bin",
                 "manifest_file": str(manifest_file_path.name),
                 "feature_dim": len(ordered_master_pred_list),
             }
@@ -396,7 +396,7 @@ def main():
         trajectory_vectors = []
         for state_preds_list_for_one_step in state_trajectory_pred_strings_list:
             state_preds_set_for_one_step = set(state_preds_list_for_one_step)
-            if args.encoding_type == "binary":
+            if args.encoding_type == "bin":
                 vector = state_preds_to_binary_vector(state_preds_set_for_one_step, ordered_master_pred_list)
             else:  # sas
                 vector = state_preds_to_sas_vector(state_preds_set_for_one_step, args.num_blocks, block_names)
@@ -404,7 +404,7 @@ def main():
         trajectory_np = np.array(trajectory_vectors, dtype=np.int8)
 
         # 5. Convert goal state to vector
-        if args.encoding_type == "binary":
+        if args.encoding_type == "bin":
             goal_vector_np = state_preds_to_binary_vector(goal_state_preds_normalized_set, ordered_master_pred_list)
         else:  # sas
             goal_vector_np = state_preds_to_sas_vector(goal_state_preds_normalized_set, args.num_blocks, block_names)

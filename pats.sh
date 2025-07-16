@@ -19,7 +19,7 @@ echo "Python version: $(python --version)"
 
 model_type='ttm'
 num_blocks=4
-encoding='sas'
+encoding='bin'  # `sas`, `bin`
 dataset_dir="data/blocks_${num_blocks}-${encoding}"
 
 # Generate timestamp and build unique dirs/paths

@@ -11,13 +11,13 @@ class PaTSDataset(Dataset):
     It loads pre-encoded binary trajectories and goal states from .npy files.
     """
 
-    def __init__(self, dataset_dir: str | Path, split_file_name: str, encoding_type: str = "binary"):
+    def __init__(self, dataset_dir: str | Path, split_file_name: str, encoding_type: str = "bin"):
         """
         Initializes the PaTSDataset.
 
         :param dataset_dir: The root directory for a specific number of blocks (e.g., 'data/blocks_4/').
         :param split_file_name: The name of the file containing problem basenames for this split (e.g., 'train_files.txt').
-        :param encoding_type: The encoding of the data to load ('binary' or 'sas').
+        :param encoding_type: The encoding of the data to load ('bin' or 'sas').
         """
         self.dataset_dir = Path(dataset_dir)
         self.split_file_path = self.dataset_dir / split_file_name

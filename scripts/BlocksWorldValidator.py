@@ -33,16 +33,16 @@ class BlocksWorldValidator:
         Initialize validator for a specific number of blocks and encoding type.
 
         :param num_blocks: The number of blocks in the domain.
-        :param encoding_type: The encoding type, either 'binary' or 'sas'.
-        :param predicate_manifest_file: Path to the predicate manifest. Required for 'binary' encoding.
+        :param encoding_type: The encoding type, either 'bin' or 'sas'.
+        :param predicate_manifest_file: Path to the predicate manifest. Required for 'bin' encoding.
         """
         self.num_blocks = num_blocks
         self.encoding_type = encoding_type
         self.block_names: List[str] = [f"b{i + 1}" for i in range(self.num_blocks)]
 
-        if self.encoding_type == "binary":
+        if self.encoding_type == "bin":
             if predicate_manifest_file is None:
-                raise ValueError("predicate_manifest_file is required for 'binary' encoding.")
+                raise ValueError("predicate_manifest_file is required for 'bin' encoding.")
             self.predicate_manifest_file = Path(predicate_manifest_file)
             # These will be populated by _setup_feature_indices_binary
             self.predicate_list: List[str] = []
@@ -130,7 +130,7 @@ class BlocksWorldValidator:
 
     def calculate_constraint_violation_loss(self, state_logits: torch.Tensor) -> torch.Tensor:
         """Dispatch to the correct loss function based on encoding."""
-        if self.encoding_type == "binary":
+        if self.encoding_type == "bin":
             return self._calculate_constraint_violation_loss_binary(state_logits)
         elif self.encoding_type == "sas":
             # NOTE: A differentiable loss for SAS+ is non-trivial as the values are discrete and interdependent.
@@ -204,7 +204,7 @@ class BlocksWorldValidator:
 
     def _check_physical_constraints(self, state: List[int] | np.ndarray) -> Tuple[bool, List[Violation]]:
         """Dispatch to the correct physical constraint checker based on encoding."""
-        if self.encoding_type == "binary":
+        if self.encoding_type == "bin":
             return self._check_physical_constraints_binary(state)
         elif self.encoding_type == "sas":
             return self._check_physical_constraints_sas(state)
@@ -381,7 +381,7 @@ class BlocksWorldValidator:
 
     def _check_legal_transition(self, state1: np.ndarray, state2: np.ndarray) -> Tuple[bool, List[Violation]]:
         """Dispatch to the correct transition checker based on encoding."""
-        if self.encoding_type == "binary":
+        if self.encoding_type == "bin":
             return self._check_legal_transition_binary(state1, state2)
         elif self.encoding_type == "sas":
             return self._check_legal_transition_sas(state1, state2)

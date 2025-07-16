@@ -30,7 +30,7 @@ The typical workflow for using PaTS is:
           --dataset_dir data/blocks_4 \
           --dataset_split_dir data/blocks_4 \
           --num_blocks 4 \
-          --encoding_type binary \ # Specify 'binary' or 'sas'
+          --encoding_type bin \ # Specify 'bin' or 'sas'
           --output_dir ./training_outputs \
           --epochs 200
       ```
@@ -49,7 +49,7 @@ The typical workflow for using PaTS is:
           --model_path ./training_outputs/ttm_N4/final_model_assets \ # Adjust path based on actual saved model
       ```
 
--          --encoding_type binary \ # Must match the model's training encoding
+-          --encoding_type bin \ # Must match the model's training encoding
           --output_dir ./benchmark_results_ttm_N4
       ```
   - The script loads test problems specified in `data/blocks_<N>/test_files.txt`, uses the appropriate model wrapper to generate plans, validates them using `BlocksWorldValidator` (which uses the predicate manifest), and computes a range of metrics.
@@ -63,7 +63,7 @@ The typical workflow for using PaTS is:
 - **`scripts/pats_dataset.py`**: Contains the `PaTSDataset` class, a unified PyTorch Dataset for loading pre-encoded binary trajectories and goal states from `.npy` files based on split file lists (e.g., `train_files.txt`).
 - **`scripts/BlocksWorldValidator.py`**:
   - Contains the `BlocksWorldValidator` class responsible for checking the physical validity of individual states and the legality of transitions between states in the Blocks World domain.
-  - **Crucially, it is initialized with `num_blocks` and an `encoding_type` ('binary' or 'sas').** For binary encoding, it also requires the path to the `predicate_manifest_<N>.txt` file. This allows it to dynamically apply the correct validation rules for the given state representation.
+  - **Crucially, it is initialized with `num_blocks` and an `encoding_type` ('bin' or 'sas').** For binary encoding, it also requires the path to the `predicate_manifest_<N>.txt` file. This allows it to dynamically apply the correct validation rules for the given state representation.
   - Provides a differentiable `calculate_constraint_violation_loss` method that can be used during training to penalize the model for generating physically invalid states, directly embedding domain rules into the learning process.
   - It defines `Violation` and `ValidationResult` dataclasses to structure validation output.
 - **`scripts/benchmark.py`**:

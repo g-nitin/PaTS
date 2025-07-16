@@ -221,8 +221,8 @@ def main():
     parser.add_argument(
         "--encoding_type",
         type=str,
-        default="binary",
-        choices=["binary", "sas"],
+        default="bin",
+        choices=["bin", "sas"],
         help="The encoding type of the dataset to use.",
     )
 
@@ -298,7 +298,7 @@ def main():
     validator = None
     if args.model_type == "lstm" and args.use_constraint_loss:
         print("Constraint loss enabled. Initializing BlocksWorldValidator...")
-        if args.encoding_type == "binary":
+        if args.encoding_type == "bin":
             manifest_path = args.dataset_dir / f"predicate_manifest_{args.num_blocks}.txt"
             if not manifest_path.exists():
                 print(

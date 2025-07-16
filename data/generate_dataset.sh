@@ -39,7 +39,7 @@ FD_TIMEOUT="60s"
 # Common ones: "astar(lmcut())", "astar(ipdb())", "astar(blind())"
 FD_SEARCH_CONFIG="astar(lmcut())"
 
-# ENCODING_TYPE: The state encoding to use. Options: "binary", "sas"
+# ENCODING_TYPE: The state encoding to use. Options: "bin", "sas"
 ENCODING_TYPE="sas"
 
 # Helper Script Check

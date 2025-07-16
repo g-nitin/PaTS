@@ -8,7 +8,17 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.b
 
 # ** Model Definition **
 class PaTS_LSTM(nn.Module):
-    def __init__(self, num_features, hidden_size, num_lstm_layers, dropout_prob=0.2, use_mlm_task=False):
+    def __init__(
+        self,
+        num_features,
+        hidden_size,
+        num_lstm_layers,
+        dropout_prob=0.2,
+        use_mlm_task=False,
+        encoding_type="binary",
+        num_blocks=None,
+        embedding_dim=32,
+    ):
         """
         Initializes the PaTS_LSTM model.
 
@@ -22,32 +32,61 @@ class PaTS_LSTM(nn.Module):
         :type dropout_prob: float
         :param use_mlm_task: If True, adds an auxiliary MLM head.
         :type use_mlm_task: bool
+        :param encoding_type: The encoding type of the data ('bin' or 'sas').
+        :type encoding_type: str
+        :param num_blocks: The number of blocks in the SAS+ encoding (required if encoding_type is 'sas').
+        :type num_blocks: int | None
+        :param embedding_dim: The dimension of the embedding for SAS+ encoding.
+        :type embedding_dim: int
         """
         super(PaTS_LSTM, self).__init__()
         self.num_features = num_features
         self.hidden_size = hidden_size
         self.num_lstm_layers = num_lstm_layers
         self.use_mlm_task = use_mlm_task
+        self.encoding_type = encoding_type
+        self.num_blocks = num_blocks
+        self.embedding_dim = embedding_dim
 
-        # Input to LSTM is concat(S_t, S_G), so 2 * num_features
+        if self.encoding_type == "sas":
+            if self.num_blocks is None:
+                raise ValueError("num_blocks must be provided for SAS+ encoding.")
+            # For N blocks, locations are: arm (-1), table (0), on_block_1 (1)... on_block_N (N)
+            # Total N+2 locations.
+            self.num_locations = self.num_blocks + 2
+            # Embedding layer to convert location indices to vectors.
+            # We add 1 to num_locations because SAS+ value -1 maps to index 0.
+            self.location_embedding = nn.Embedding(self.num_locations, self.embedding_dim)
+            # LSTM input is the concatenation of embedded current state and goal state
+            lstm_input_size = 2 * self.num_blocks * self.embedding_dim
+            # The head predicts a location for each block
+            self.forecasting_head = nn.Linear(hidden_size, self.num_blocks * self.num_locations)
+            print(
+                f"INFO: PaTS_LSTM (SAS+) initialized. Num locations: {self.num_locations}, Embedding dim: {self.embedding_dim}"
+            )
+        else:  # Binary encoding
+            lstm_input_size = 2 * num_features
+            self.forecasting_head = nn.Linear(hidden_size, num_features)
+            if use_mlm_task:
+                self.mlm_head = nn.Linear(hidden_size, num_features)
+            print("INFO: PaTS_LSTM (binary) initialized.")
+
         self.lstm = nn.LSTM(
-            input_size=2 * num_features,  # Input to LSTM is concat(S_t, S_G)
+            input_size=lstm_input_size,
             hidden_size=hidden_size,
             num_layers=num_lstm_layers,
             batch_first=True,  # Expects (batch, seq_len, features)
             dropout=dropout_prob if num_lstm_layers > 1 else 0.0,
         )
 
-        # Prediction Heads
-        # Primary head for next-state forecasting
-        self.forecasting_head = nn.Linear(hidden_size, num_features)
+    def _map_sas_to_indices(self, sas_tensor):
+        # SAS+ values: -1 (arm), 0 (table), 1..N (on block 1..N)
+        # Embedding indices: 0, 1, 2..N+1
+        return sas_tensor + 1
 
-        # Auxiliary head for Masked Language Modeling (state reconstruction)
-        if use_mlm_task:
-            self.mlm_head = nn.Linear(hidden_size, num_features)
-            print("INFO: PaTS_LSTM initialized with an active MLM head.")
-        else:
-            print("INFO: PaTS_LSTM initialized without an MLM head.")
+    def _map_indices_to_sas(self, indices_tensor):
+        # Embedding indices -> SAS+ values
+        return indices_tensor - 1
 
     def forward(self, current_states_batch, goal_state_batch, lengths, h_init=None, c_init=None):
         """
@@ -68,26 +107,34 @@ class PaTS_LSTM(nn.Module):
             - (h_n, c_n): Last hidden and cell states.
         :rtype: Tuple[Tensor, Tensor | None, Tuple[Tensor, Tensor]]
         """
-        batch_size, max_seq_len, _ = current_states_batch.shape
+        if self.encoding_type == "sas":
+            # Map SAS+ values to non-negative indices for embedding lookup
+            current_indices = self._map_sas_to_indices(current_states_batch)
+            goal_indices = self._map_sas_to_indices(goal_state_batch)
 
-        # Expand goal state to match sequence length for concatenation
-        # goal_state_expanded: (B, S_max, F)
-        goal_state_expanded = goal_state_batch.unsqueeze(1).repeat(1, max_seq_len, 1)
+            # Embed the state sequences and goal states
+            current_embedded = self.location_embedding(current_indices)  # (B, S_max, N, E)
+            goal_embedded = self.location_embedding(goal_indices)  # (B, N, E)
 
-        # Concatenate current state sequences and goal states along the feature dimension
-        # lstm_input: (B, S_max, 2 * F)
-        lstm_input = torch.cat((current_states_batch, goal_state_expanded), dim=2)
+            # Flatten the embeddings for LSTM input
+            batch_size, max_seq_len, _, _ = current_embedded.shape
+            current_flat = current_embedded.view(batch_size, max_seq_len, -1)
+            goal_flat = goal_embedded.view(batch_size, -1)
+            goal_expanded = goal_flat.unsqueeze(1).repeat(1, max_seq_len, 1)
 
-        # lengths should be on CPU for pack_padded_sequence
+            lstm_input = torch.cat((current_flat, goal_expanded), dim=2)
+        else:  # Binary encoding
+            batch_size, max_seq_len, _ = current_states_batch.shape
+            goal_state_expanded = goal_state_batch.unsqueeze(1).repeat(1, max_seq_len, 1)
+            lstm_input = torch.cat((current_states_batch, goal_state_expanded), dim=2)
+
+        # Common LSTM Logic
+        # Lengths should be on CPU for pack_padded_sequence
         packed_input = pack_padded_sequence(lstm_input, lengths.cpu(), batch_first=True, enforce_sorted=False)
 
         if h_init is None or c_init is None:
-            h_0 = torch.zeros(self.num_lstm_layers, batch_size, self.hidden_size).to(
-                current_states_batch.device
-            )  # Use input device
-            c_0 = torch.zeros(self.num_lstm_layers, batch_size, self.hidden_size).to(
-                current_states_batch.device
-            )  # Use input device
+            h_0 = torch.zeros(self.num_lstm_layers, batch_size, self.hidden_size).to(lstm_input.device)
+            c_0 = torch.zeros(self.num_lstm_layers, batch_size, self.hidden_size).to(lstm_input.device)
         else:
             h_0, c_0 = h_init, c_init
 
@@ -96,14 +143,13 @@ class PaTS_LSTM(nn.Module):
         # Unpack sequence
         lstm_out, _ = pad_packed_sequence(packed_output, batch_first=True, total_length=max_seq_len)
 
-        # Primary Task: Forecasting Head
+        # Head logic
         forecasting_logits = self.forecasting_head(lstm_out)
+        mlm_logits = None  # MLM not supported for SAS+ here
 
-        # Auxiliary Task: MLM Head
-        mlm_logits = None
-        if self.use_mlm_task:
-            # The MLM head uses the same shared representation to reconstruct the input sequence.
-            mlm_logits = self.mlm_head(lstm_out)
+        if self.encoding_type == "sas":
+            # Reshape logits to (B, S_max, num_blocks, num_locations) for CrossEntropyLoss
+            forecasting_logits = forecasting_logits.view(batch_size, max_seq_len, self.num_blocks, self.num_locations)
 
         return forecasting_logits, mlm_logits, (h_n, c_n)
 
@@ -126,11 +172,22 @@ class PaTS_LSTM(nn.Module):
         """
         self.eval()  # Set to evaluation mode
 
-        # Reshape S_t to (batch_size=1, seq_len=1, num_features) for LSTM input
-        current_state_S_t_seq = current_state_S_t.unsqueeze(1)  # (1, 1, F)
-        goal_state_S_G_expanded = goal_state_S_G.unsqueeze(1)  # (1, 1, F)
+        if self.encoding_type == "sas":
+            current_indices = self._map_sas_to_indices(current_state_S_t).unsqueeze(1)  # (1, 1, N)
+            goal_indices = self._map_sas_to_indices(goal_state_S_G)  # (1, N)
 
-        lstm_input_step = torch.cat((current_state_S_t_seq, goal_state_S_G_expanded), dim=2)  # (1, 1, 2F)
+            current_embedded = self.location_embedding(current_indices)  # (1, 1, N, E)
+            goal_embedded = self.location_embedding(goal_indices)  # (1, N, E)
+
+            current_flat = current_embedded.view(1, 1, -1)
+            goal_flat = goal_embedded.view(1, -1)
+            goal_expanded = goal_flat.unsqueeze(1)
+
+            lstm_input_step = torch.cat((current_flat, goal_expanded), dim=2)
+        else:  # Binary
+            current_state_S_t_seq = current_state_S_t.unsqueeze(1)
+            goal_state_S_G_expanded = goal_state_S_G.unsqueeze(1)
+            lstm_input_step = torch.cat((current_state_S_t_seq, goal_state_S_G_expanded), dim=2)
 
         # LSTM expects (h_0, c_0) even for a single step if states are passed
         lstm_out, (h_next, c_next) = self.lstm(lstm_input_step, (h_prev, c_prev))
@@ -138,12 +195,18 @@ class PaTS_LSTM(nn.Module):
 
         # Use the forecasting head for prediction
         next_state_logits = self.forecasting_head(lstm_out.squeeze(1))
-        next_state_probs = torch.sigmoid(next_state_logits)
-
-        # Convert probabilities to binary state (e.g., thresholding)
-        next_state_binary = (next_state_probs > 0.5).float()
-
-        return next_state_binary, next_state_probs, h_next, c_next
+        if self.encoding_type == "sas":
+            # Reshape to (1, num_blocks, num_locations)
+            logits_per_block = next_state_logits.view(1, self.num_blocks, self.num_locations)
+            # Get the predicted location index for each block
+            predicted_indices = torch.argmax(logits_per_block, dim=2)  # (1, N)
+            # Map back to SAS+ values
+            next_state_sas = self._map_indices_to_sas(predicted_indices)
+            return next_state_sas, logits_per_block, h_next, c_next
+        else:  # Binary
+            next_state_probs = torch.sigmoid(next_state_logits)
+            next_state_binary = (next_state_probs > 0.5).float()
+            return next_state_binary, next_state_probs, h_next, c_next
 
 
 def lstm_collate_fn(batch, mlm_mask_prob=0.15):

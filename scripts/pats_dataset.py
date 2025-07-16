@@ -86,9 +86,15 @@ class PaTSDataset(Dataset):
             raise FileNotFoundError(f"Goal file not found for basename {basename}: {goal_path}")
 
         try:
-            # Load as float32 for direct use in PyTorch tensors
-            expert_trajectory_np = np.load(traj_path).astype(np.float32)  # (L, F)
-            goal_state_np = np.load(goal_path).astype(np.float32)  # (F,)
+            # Load trajectory and goal based on encoding type
+            if self.encoding_type == "sas":
+                # For SAS+, we need integer types for embedding layers and loss functions
+                expert_trajectory_np = np.load(traj_path).astype(np.int64)
+                goal_state_np = np.load(goal_path).astype(np.int64)
+            else:  # binary
+                expert_trajectory_np = np.load(traj_path).astype(np.float32)
+                goal_state_np = np.load(goal_path).astype(np.float32)
+
         except Exception as e:
             raise IOError(f"Failed to load .npy files for basename {basename} (idx {idx}): {e}") from e
 

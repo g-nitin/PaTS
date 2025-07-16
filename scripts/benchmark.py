@@ -74,45 +74,48 @@ class TTMWrapper(PlannableModel):
         if self.model is None or self.config is None:
             raise RuntimeError("TTM model not loaded. Call load_model() first.")
 
-        # TTM's predict method handles batching, but here we do one at a time for simplicity in benchmark loop
-        # Inputs to TTM's predict are 0/1 torch tensors
-        initial_state_tensor = torch.from_numpy(initial_state_np.astype(np.float32)).unsqueeze(0)  # (1, F)
-        goal_state_tensor = torch.from_numpy(goal_state_np.astype(np.float32)).unsqueeze(0)  # (1, F)
+        self.ttm_instance.model.eval()
+        with torch.no_grad():
+            # Convert numpy inputs to torch tensors
+            initial_state_tensor = torch.from_numpy(initial_state_np.astype(np.float32)).unsqueeze(0)  # (1, F)
+            goal_state_tensor = torch.from_numpy(goal_state_np.astype(np.float32)).unsqueeze(0)  # (1, F)
 
-        # The TTM's internal predict method uses its configured prediction_length.
-        # We might want to allow overriding max_length if TTM supports variable length generation,
-        # or if we need to truncate/extend its fixed-length output.
-        # For now, we rely on TTM's prediction_length.
-        # The `max_length` argument here is more of a general guideline for the benchmark.
+            # Initialize the context by repeating the initial state
+            current_context = initial_state_tensor.unsqueeze(1).repeat(1, self.config.context_length, 1)  # (1, C, F)
 
-        # The existing TTM predict method returns a tensor of shape (batch_size, prediction_length, num_features)
-        # with values 0.0 or 1.0.
-        predicted_plan_tensor_01 = self.ttm_instance.predict(initial_state_tensor, goal_state_tensor)  # (1, pred_len, F)
+            # The plan starts with the initial state
+            generated_plan_tensors = [initial_state_tensor.squeeze(0)]
 
-        # Convert to List[List[int]]
-        # Squeeze batch dimension, convert to numpy, then to list of lists
-        predicted_plan_np_01 = predicted_plan_tensor_01.squeeze(0).cpu().numpy()
+            for step in range(max_length - 1):  # max_length includes S0
+                # Predict the next sequence of states from the current context
+                # The underlying predict method now takes the full context
+                predicted_future_sequence = self.ttm_instance.predict(current_context, goal_state_tensor)  # (1, P, F)
 
-        # The TTM output is the sequence of *next* states. We need to prepend the initial state.
-        # However, TTM's `predict` is designed to forecast `prediction_length` steps *from* the context.
-        # The output `predictions_original_binary` in TTM's `predict` is already the sequence of predicted future states.
-        # We need to decide if the "plan" includes S0. Classical plans usually start from S0.
-        # If TTM output is S1...ST, we prepend S0.
-        # Let's assume TTM output is S1...Spred_len.
+                # We only need the very next state for our autoregressive step
+                next_state = predicted_future_sequence[:, 0, :]  # (1, F)
 
-        # The current TTM `predict` method in `ttm.py` returns the *predicted future states*.
-        # So, we should prepend the initial state to form the full trajectory.
-        full_trajectory_np = np.vstack((initial_state_np, predicted_plan_np_01))
+                # Stagnation check: if the model predicts no change, stop.
+                # This prevents infinitely long plans of repeating states.
+                last_state_in_context = current_context[:, -1, :]
+                if torch.equal(next_state, last_state_in_context):
+                    # print(f"TTM: Stagnation detected at step {step + 1}. Stopping.")
+                    break
 
-        # Truncate to max_length if necessary (though TTM has fixed prediction_length)
-        # This max_length is for the benchmark, not for TTM's internal generation limit.
-        # The validator will check if goal is reached within this.
-        if full_trajectory_np.shape[0] > max_length:
-            # This truncation might be aggressive if TTM needs its full prediction length to reach goal
-            # print(f"Warning: TTM prediction truncated from {full_trajectory_np.shape[0]} to {max_length}")
-            pass  # For now, let TTM produce its sequence, validator will check goal achievement
+                generated_plan_tensors.append(next_state.squeeze(0))
 
-        return [state.astype(int).tolist() for state in full_trajectory_np]
+                # Update the context for the next iteration:
+                # Roll the context to the left and append the new state at the end
+                current_context = torch.roll(current_context, shifts=-1, dims=1)
+                current_context[:, -1, :] = next_state
+
+                # Goal achievement check
+                if torch.equal(next_state.squeeze(0), goal_state_tensor.squeeze(0)):
+                    # print(f"TTM: Goal reached at step {step + 1}.")
+                    break
+
+            # Convert the final list of tensors to the required List[List[int]] format
+            final_plan_np = torch.stack(generated_plan_tensors).cpu().numpy()
+            return [state.astype(int).tolist() for state in final_plan_np]
 
     @property
     def model_name(self) -> str:
@@ -441,7 +444,9 @@ def run_benchmark(args: argparse.Namespace):
             print(f"ERROR: Predicate manifest file not found: {predicate_manifest_file}")
             return
         try:
-            validator = BlocksWorldValidator(num_blocks, args.encoding_type, predicate_manifest_file=predicate_manifest_file)
+            validator = BlocksWorldValidator(
+                num_blocks, args.encoding_type, predicate_manifest_file=predicate_manifest_file
+            )
             print(f"Validator initialized with state_size={validator.state_size}.")
         except Exception as e:
             print(f"ERROR: Failed to initialize BlocksWorldValidator for binary encoding: {e}")

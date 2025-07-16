@@ -312,11 +312,14 @@ class BlocksWorldTTM:
         if self.tb_writer:
             self.tb_writer.close()
 
-    def predict(self, initial_states: torch.Tensor, goal_states: torch.Tensor) -> torch.Tensor:
-        """Generate action sequences to reach goals from given states.
-        initial_states and goal_states are expected to be 0/1.
-        The method will scale them internally before feeding to the model.
-        Returns predictions in 0/1 format.
+    def predict(self, context_sequence: torch.Tensor, goal_states: torch.Tensor) -> torch.Tensor:
+        """
+        Predicts a sequence of future states given a context sequence and goal states.
+        This is the core model call used by the autoregressive loop.
+
+        :param context_sequence: A tensor of shape (batch_size, context_length, num_features) containing the recent history of states (in 0/1 format).
+        :param goal_states: A tensor of shape (batch_size, num_features) for the goal states (in 0/1 format).
+        :return: A tensor of shape (batch_size, prediction_length, num_features) containing the predicted future states (in 0/1 format).
         """
         if self.model is None:
             raise RuntimeError("Model needs to be trained or loaded before prediction.")
@@ -325,18 +328,15 @@ class BlocksWorldTTM:
 
         self.model.eval()
         with torch.no_grad():
-            batch_size = initial_states.shape[0]
+            batch_size = context_sequence.shape[0]
 
-            # Scale inputs from 0/1 to -1/1
-            initial_states_scaled = initial_states.to(self.device) * 2.0 - 1.0
+            # Scale inputs from 0/1 to -1/1 for the model
+            context_sequence_scaled = context_sequence.to(self.device) * 2.0 - 1.0
             goal_states_scaled = goal_states.to(self.device) * 2.0 - 1.0
-
-            # Context sequence: repeat the scaled initial state
-            context_sequence_scaled = initial_states_scaled.unsqueeze(1).repeat(1, self.config.context_length, 1)
 
             inputs = {
                 "past_values": context_sequence_scaled,
-                "past_observed_mask": torch.ones_like(context_sequence_scaled).to(self.device),  # Mask is 1 for observed
+                "past_observed_mask": torch.ones_like(context_sequence_scaled).to(self.device),
                 "static_categorical_values": goal_states_scaled,
                 "freq_token": torch.zeros(batch_size, dtype=torch.long).to(self.device),
             }
@@ -344,14 +344,13 @@ class BlocksWorldTTM:
             outputs = self.model(**inputs)
             raw_logits = outputs[0]  # Shape: (batch_size, prediction_length, num_features)
 
+            # Binarize the output logits
             predictions_tanh = torch.tanh(raw_logits)
-
-            # Binarize to -1 or 1 based on tanh output (threshold at 0)
             predictions_scaled_binary = torch.where(
                 predictions_tanh > 0, torch.tensor(1.0, device=self.device), torch.tensor(-1.0, device=self.device)
             )
 
-            # Convert back to 0/1 for the return value
+            # Convert back from -1/1 to 0/1 for the return value
             predictions_original_binary = (predictions_scaled_binary + 1.0) / 2.0
 
         return predictions_original_binary

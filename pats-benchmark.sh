@@ -17,13 +17,13 @@ echo $CONDA_DEFAULT_ENV
 hostname
 echo "Python version: $(python --version)"
 
-model_type='lstm'
+model_type='ttm'
 num_blocks=4
-encoding='sas'
+encoding='bin'  # `sas`, `bin`
 dataset_dir="data/blocks_${num_blocks}-${encoding}"
 
 # Generate timestamp and build unique dirs/paths
-timestamp='20250711_203405'
+timestamp='20250716_152958'
 
 output_dir="./training_outputs_${encoding}/${model_type}_${timestamp}"
 benchmark_output_dir="./benchmark_results_${encoding}/${model_type}_${timestamp}"
@@ -50,6 +50,7 @@ python -m scripts.benchmark \
     --model_type $model_type \
     --model_path $model_path \
     --output_dir $benchmark_output_dir \
+    --encoding_type $encoding \
     --max_plan_length 60 \
     --save_detailed_results
 

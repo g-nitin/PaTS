@@ -76,12 +76,13 @@ class TTMWrapper(PlannableModel):
 
         self.ttm_instance.model.eval()
         with torch.no_grad():
-            # Convert numpy inputs to torch tensors
-            initial_state_tensor = torch.from_numpy(initial_state_np.astype(np.float32)).unsqueeze(0)  # (1, F)
-            goal_state_tensor = torch.from_numpy(goal_state_np.astype(np.float32)).unsqueeze(0)  # (1, F)
+            # Convert numpy inputs to torch tensors and MOVE TO THE CORRECT DEVICE
+            initial_state_tensor = torch.from_numpy(initial_state_np.astype(np.float32)).unsqueeze(0).to(self.device)
+            goal_state_tensor = torch.from_numpy(goal_state_np.astype(np.float32)).unsqueeze(0).to(self.device)
 
             # Initialize the context by repeating the initial state
-            current_context = initial_state_tensor.unsqueeze(1).repeat(1, self.config.context_length, 1)  # (1, C, F)
+            # This will now be on the correct device because initial_state_tensor is
+            current_context = initial_state_tensor.unsqueeze(1).repeat(1, self.config.context_length, 1)
 
             # The plan starts with the initial state
             generated_plan_tensors = [initial_state_tensor.squeeze(0)]

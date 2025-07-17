@@ -80,7 +80,9 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
                 # For CrossEntropyLoss, logits should be (N, C) and targets (N)
                 # N = total number of blocks to predict across batch, C = num_locations
                 # Create a mask to select only the valid time steps based on sequence lengths
-                mask = torch.arange(max(lengths), device=DEVICE)[None, :] < lengths.clone().detach()[:, None]  # (B, S_max)
+                mask = (
+                    torch.arange(max(lengths), device=DEVICE)[None, :] < lengths.clone().detach().to(DEVICE)[:, None]
+                )  # (B, S_max)
 
                 # Reshape logits and targets and apply the mask
                 # Logits: (B, S_max, N_blocks, N_locs) -> (num_active_steps, N_blocks, N_locs)
@@ -166,7 +168,10 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
                     forecasting_logits, mlm_logits, _ = model(input_seqs, goal_states, lengths)
 
                     if args.encoding_type == "sas":
-                        mask = torch.arange(max(lengths), device=DEVICE)[None, :] < lengths.clone().detach()[:, None]
+                        mask = (
+                            torch.arange(max(lengths), device=DEVICE)[None, :]
+                            < lengths.clone().detach().to(DEVICE)[:, None]
+                        )
                         active_logits = forecasting_logits[mask]
                         active_targets = target_seqs[mask]
 

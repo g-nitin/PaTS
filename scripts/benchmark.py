@@ -192,10 +192,15 @@ class LSTMWrapper(PlannableModel):
             # Create tensors with the correct dtype based on the model's encoding type
             if self.lstm_model.encoding_type == "sas":
                 # For SAS+, the input is integer indices and requires a LongTensor
+                # Safeguard exists to clamp out-of-bounds indices from input files
+                # This mirrors the safeguard in train_model.py and prevents CUDA asserts.
+                # The valid indices are 0 (table) through N (block N), where N = num_blocks.
+                max_valid_index = self.lstm_model.num_blocks
+                initial_state_np.clip(min=0, max=max_valid_index, out=initial_state_np)
+                goal_state_np.clip(min=0, max=max_valid_index, out=goal_state_np)
                 current_S_tensor = torch.LongTensor(initial_state_np).unsqueeze(0).to(self.device)
                 goal_S_tensor = torch.LongTensor(goal_state_np).unsqueeze(0).to(self.device)
             else:  # 'bin' encoding
-                # For binary encoding, the input is a float tensor of 0s and 1s
                 current_S_tensor = torch.FloatTensor(initial_state_np).unsqueeze(0).to(self.device)
                 goal_S_tensor = torch.FloatTensor(goal_state_np).unsqueeze(0).to(self.device)
 

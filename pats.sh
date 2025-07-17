@@ -17,9 +17,9 @@ echo $CONDA_DEFAULT_ENV
 hostname
 echo "Python version: $(python --version)"
 
-model_type='ttm'
+model_type='lstm'  # `lstm`, `ttm`
 num_blocks=4
-encoding='bin'  # `sas`, `bin`
+encoding='sas'  # `sas`, `bin`
 dataset_dir="data/blocks_${num_blocks}-${encoding}"
 
 # Generate timestamp and build unique dirs/paths

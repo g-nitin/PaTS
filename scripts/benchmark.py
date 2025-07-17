@@ -152,8 +152,14 @@ class LSTMWrapper(PlannableModel):
         # Check if the model was trained with the MLM task
         was_trained_with_mlm = checkpoint.get("use_mlm_task", False)
 
-        if not all([num_features, hidden_size, num_lstm_layers]):
-            raise ValueError("LSTM checkpoint missing required parameters (num_features, hidden_size, num_lstm_layers).")
+        encoding_type = checkpoint.get("encoding_type", "bin")  # Default to 'bin' if not found
+        num_blocks = checkpoint.get("target_num_blocks")
+        embedding_dim = checkpoint.get("embedding_dim")
+
+        if not all([num_features, hidden_size, num_lstm_layers, num_blocks is not None]):
+            raise ValueError(
+                "LSTM checkpoint missing required parameters (num_features, hidden_size, num_lstm_layers, target_num_blocks)."
+            )
 
         self._state_dim = num_features
         # Instantiate the model with the correct configuration based on the checkpoint
@@ -163,12 +169,18 @@ class LSTMWrapper(PlannableModel):
             num_lstm_layers=num_lstm_layers,
             dropout_prob=dropout_prob,
             use_mlm_task=was_trained_with_mlm,
+            encoding_type=encoding_type,
+            num_blocks=num_blocks,
+            embedding_dim=embedding_dim,
         ).to(self.device)
 
         self.lstm_model.load_state_dict(checkpoint["model_state_dict"])
         self.lstm_model.eval()
         self.model = self.lstm_model  # For consistency with PlannableModel
-        print(f"LSTM model loaded. Features: {num_features}, Hidden: {hidden_size}, Layers: {num_lstm_layers}")
+        print(
+            f"LSTM model loaded. Features: {num_features}, Hidden: {hidden_size}, "
+            f"Layers: {num_lstm_layers}, Encoding: {encoding_type}"
+        )
 
     def predict_sequence(self, initial_state_np: np.ndarray, goal_state_np: np.ndarray, max_length: int) -> List[List[int]]:
         if self.lstm_model is None:

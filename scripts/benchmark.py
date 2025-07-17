@@ -189,8 +189,15 @@ class LSTMWrapper(PlannableModel):
         # generate_plan_lstm is a standalone function in lstm.py, let's adapt its core logic
         self.lstm_model.eval()
         with torch.no_grad():
-            current_S_tensor = torch.FloatTensor(initial_state_np).unsqueeze(0).to(self.device)  # (1, F)
-            goal_S_tensor = torch.FloatTensor(goal_state_np).unsqueeze(0).to(self.device)  # (1, F)
+            # Create tensors with the correct dtype based on the model's encoding type
+            if self.lstm_model.encoding_type == "sas":
+                # For SAS+, the input is integer indices and requires a LongTensor
+                current_S_tensor = torch.LongTensor(initial_state_np).unsqueeze(0).to(self.device)
+                goal_S_tensor = torch.LongTensor(goal_state_np).unsqueeze(0).to(self.device)
+            else:  # 'bin' encoding
+                # For binary encoding, the input is a float tensor of 0s and 1s
+                current_S_tensor = torch.FloatTensor(initial_state_np).unsqueeze(0).to(self.device)
+                goal_S_tensor = torch.FloatTensor(goal_state_np).unsqueeze(0).to(self.device)
 
             h_prev = torch.zeros(self.lstm_model.num_lstm_layers, 1, self.lstm_model.hidden_size).to(self.device)
             c_prev = torch.zeros(self.lstm_model.num_lstm_layers, 1, self.lstm_model.hidden_size).to(self.device)
@@ -198,11 +205,9 @@ class LSTMWrapper(PlannableModel):
             generated_plan_tensors = [current_S_tensor.clone()]  # Start with S0
 
             for step in range(max_length - 1):  # Max_length includes S0
-                next_S_binary, _, h_next, c_next = self.lstm_model.predict_step(
-                    current_S_tensor, goal_S_tensor, h_prev, c_prev
-                )
-                generated_plan_tensors.append(next_S_binary.clone())
-                current_S_tensor = next_S_binary
+                next_S, _, h_next, c_next = self.lstm_model.predict_step(current_S_tensor, goal_S_tensor, h_prev, c_prev)
+                generated_plan_tensors.append(next_S.clone())
+                current_S_tensor = next_S
                 h_prev, c_prev = h_next, c_next
 
                 if torch.equal(current_S_tensor.squeeze(), goal_S_tensor.squeeze()):  # Compare 1D tensors

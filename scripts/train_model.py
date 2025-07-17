@@ -487,6 +487,8 @@ def main():
             ttm_model_path=args.ttm_model_path,
             seed=args.seed,
             state_dim=num_features,
+            encoding_type=args.encoding_type,
+            num_blocks=args.num_blocks,
         )
         print(f"TTM ModelConfig: {ttm_model_config}")
 

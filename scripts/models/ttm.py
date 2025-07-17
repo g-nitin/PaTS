@@ -71,7 +71,9 @@ class ModelConfig:
     num_epochs: int
     ttm_model_path: str
     seed: int
-    state_dim: Optional[int] = None  # Will be set during training or loaded
+    state_dim: Optional[int] = None
+    encoding_type: str = "bin"  # Specifies the encoding used (e.g., 'bin', 'sas')
+    num_blocks: Optional[int] = None  # Number of blocks, relevant for SAS+ validation
 
 
 # Callback class for custom TensorBoard logging
@@ -108,14 +110,27 @@ class TTMDataCollator:
         context_length: int,
         prediction_length: int,
         state_dim: int,  # state_dim is crucial for creating correct shapes
+        encoding_type: str = "bin",  # Encoding type to determine data processing
     ):
         self.context_length: int = context_length
         self.prediction_length: int = prediction_length
         self.state_dim: int = state_dim
+        self.encoding_type: str = encoding_type  # Store encoding type
 
     def _scale_binary_array(self, data_array_np: np.ndarray) -> np.ndarray:
         """Scales a numpy array of 0s and 1s to -1s and 1s."""
         return data_array_np * 2.0 - 1.0
+
+    def _process_values(self, data_array_np: np.ndarray) -> np.ndarray:
+        """Processes a numpy array based on encoding type (scales for bin, casts to float for sas)."""
+        if self.encoding_type == "bin":
+            return data_array_np * 2.0 - 1.0  # Scale 0/1 to -1/1
+        elif self.encoding_type == "sas":
+            # For SAS+, values are integers (e.g., -1, 0, 1, 2...). TTM expects floats.
+            # Cast to float32. No custom scaling as TTM is a regression model.
+            return data_array_np.astype(np.float32)
+        else:
+            raise ValueError(f"Unsupported encoding type: {self.encoding_type}")
 
     def __call__(self, batch_items: List[Dict[str, np.ndarray]]) -> Dict[str, torch.Tensor]:
         # batch_items is a list of dicts from PaTSDataset.__getitem__
@@ -124,11 +139,11 @@ class TTMDataCollator:
 
         batch_size = len(batch_items)
 
-        list_past_values_scaled = []
-        list_future_values_scaled = []
+        list_past_values_processed = []
+        list_future_values_processed = []
         list_past_observed_mask = []
         list_future_observed_mask = []
-        list_static_categorical_scaled = []
+        list_static_categorical_processed = []
 
         # print(batch_items)
         for item in batch_items:
@@ -147,6 +162,9 @@ class TTMDataCollator:
                 if num_plan_steps_for_context < self.context_length:
                     last_observed_state_in_context = plan_states_np_orig[num_plan_steps_for_context - 1]
                     num_past_padding = self.context_length - num_plan_steps_for_context
+                    # Ensure padding values match the original data type before processing
+                    if self.encoding_type == "sas":
+                        last_observed_state_in_context = last_observed_state_in_context.astype(np.int64)
                     padding_values = np.tile(last_observed_state_in_context, (num_past_padding, 1))
                     past_values_np[num_plan_steps_for_context:] = padding_values
             elif self.context_length > 0:  # plan_states_np_orig might be empty or shorter than context
@@ -172,26 +190,29 @@ class TTMDataCollator:
 
             if len_to_copy_to_future < self.prediction_length:
                 num_future_padding = self.prediction_length - len_to_copy_to_future
+                # Ensure padding values match the original data type before processing
+                if self.encoding_type == "sas":
+                    goal_state_np_orig = goal_state_np_orig.astype(np.int64)
                 padding_values = np.tile(goal_state_np_orig, (num_future_padding, 1))
                 future_values_np[len_to_copy_to_future:] = padding_values
                 future_observed_mask_np[len_to_copy_to_future:, :] = 1.0
 
             static_categorical_values_np = goal_state_np_orig.copy()
 
-            list_past_values_scaled.append(self._scale_binary_array(past_values_np))
-            list_future_values_scaled.append(self._scale_binary_array(future_values_np))
+            list_past_values_processed.append(self._process_values(past_values_np))
+            list_future_values_processed.append(self._process_values(future_values_np))
             list_past_observed_mask.append(past_observed_mask_np)
             list_future_observed_mask.append(future_observed_mask_np)
-            list_static_categorical_scaled.append(self._scale_binary_array(static_categorical_values_np))
+            list_static_categorical_processed.append(self._process_values(static_categorical_values_np))
 
         # Stack and convert to tensors. Trainer will move to device.
         return {
             "freq_token": torch.zeros(batch_size, dtype=torch.long),
-            "past_values": torch.from_numpy(np.array(list_past_values_scaled, dtype=np.float32)),
-            "future_values": torch.from_numpy(np.array(list_future_values_scaled, dtype=np.float32)),
+            "past_values": torch.from_numpy(np.array(list_past_values_processed, dtype=np.float32)),
+            "future_values": torch.from_numpy(np.array(list_future_values_processed, dtype=np.float32)),
             "past_observed_mask": torch.from_numpy(np.array(list_past_observed_mask, dtype=np.float32)),
             "future_observed_mask": torch.from_numpy(np.array(list_future_observed_mask, dtype=np.float32)),
-            "static_categorical_values": torch.from_numpy(np.array(list_static_categorical_scaled, dtype=np.float32)),
+            "static_categorical_values": torch.from_numpy(np.array(list_static_categorical_processed, dtype=np.float32)),
         }
 
 
@@ -206,6 +227,18 @@ class BlocksWorldTTM:
         self.output_dir: PosixPath | Path = output_dir
         self.tb_writer: Optional[SummaryWriter] = None
 
+    def _ensure_config_consistency(self, train_dataset: PaTSDataset):
+        """Ensures that the ModelConfig is consistent with the dataset."""
+        if self.config.state_dim is None:
+            self.config.state_dim = train_dataset.state_dim
+        if self.config.encoding_type != train_dataset.encoding_type:
+            logger.warning(
+                f"ModelConfig encoding_type ({self.config.encoding_type}) differs from train_dataset encoding_type ({train_dataset.encoding_type}). Using dataset's type."
+            )
+            self.config.encoding_type = train_dataset.encoding_type
+        if self.config.encoding_type == "sas" and self.config.num_blocks is None:
+            raise ValueError("For SAS+ encoding, num_blocks must be provided in ModelConfig.")
+
     def train(
         self,
         train_dataset,
@@ -213,6 +246,7 @@ class BlocksWorldTTM:
     ):
         logger.info("Starting model training...")
         logger.info(f"Initializing TTM model from: {self.config.ttm_model_path}")
+        self._ensure_config_consistency(train_dataset)  # Call new consistency check
 
         get_model_params = {
             "model_path": self.config.ttm_model_path,
@@ -292,6 +326,7 @@ class BlocksWorldTTM:
             context_length=self.config.context_length,
             prediction_length=self.config.prediction_length,
             state_dim=self.config.state_dim,  # type: ignore
+            encoding_type=self.config.encoding_type,  # Pass encoding type to collator
         )
 
         self.trainer = Trainer(
@@ -317,43 +352,63 @@ class BlocksWorldTTM:
         Predicts a sequence of future states given a context sequence and goal states.
         This is the core model call used by the autoregressive loop.
 
-        :param context_sequence: A tensor of shape (batch_size, context_length, num_features) containing the recent history of states (in 0/1 format).
-        :param goal_states: A tensor of shape (batch_size, num_features) for the goal states (in 0/1 format).
-        :return: A tensor of shape (batch_size, prediction_length, num_features) containing the predicted future states (in 0/1 format).
+        :param context_sequence: A tensor of shape (batch_size, context_length, num_features) containing the recent history of states. For 'bin', 0/1 values. For 'sas', integer values.
+        :param goal_states: A tensor of shape (batch_size, num_features) for the goal states. For 'bin', 0/1 values. For 'sas', integer values.
+        :return: A tensor of shape (batch_size, prediction_length, num_features) containing the predicted future states. For 'bin', 0/1 values. For 'sas', integer values.
         """
         if self.model is None:
             raise RuntimeError("Model needs to be trained or loaded before prediction.")
         if self.config.state_dim is None:
             raise RuntimeError("Model config state_dim is not set.")
 
+        if self.config.encoding_type == "sas" and self.config.num_blocks is None:
+            raise ValueError("num_blocks must be set in ModelConfig for SAS+ encoding prediction.")
+
         self.model.eval()
         with torch.no_grad():
             batch_size = context_sequence.shape[0]
 
-            # Scale inputs from 0/1 to -1/1 for the model
-            context_sequence_scaled = context_sequence.to(self.device) * 2.0 - 1.0
-            goal_states_scaled = goal_states.to(self.device) * 2.0 - 1.0
+            # Process inputs based on encoding type
+            if self.config.encoding_type == "bin":
+                # Scale 0/1 to -1/1 for binary
+                context_sequence_processed = context_sequence.to(self.device) * 2.0 - 1.0
+                goal_states_processed = goal_states.to(self.device) * 2.0 - 1.0
+            elif self.config.encoding_type == "sas":
+                # For SAS+, inputs are integer types from PaTSDataset, cast to float.
+                # No scaling, as TTM expects continuous values for regression.
+                context_sequence_processed = context_sequence.to(self.device).float()
+                goal_states_processed = goal_states.to(self.device).float()
+            else:
+                raise ValueError(f"Unsupported encoding type: {self.config.encoding_type}")
 
             inputs = {
-                "past_values": context_sequence_scaled,
-                "past_observed_mask": torch.ones_like(context_sequence_scaled).to(self.device),
-                "static_categorical_values": goal_states_scaled,
+                "past_values": context_sequence_processed,
+                "past_observed_mask": torch.ones_like(context_sequence_processed).to(self.device),
+                "static_categorical_values": goal_states_processed,  # Goal states are static features
                 "freq_token": torch.zeros(batch_size, dtype=torch.long).to(self.device),
             }
 
             outputs = self.model(**inputs)
-            raw_logits = outputs[0]  # Shape: (batch_size, prediction_length, num_features)
+            raw_predictions = outputs[0]  # Shape: (batch_size, prediction_length, num_features)
 
-            # Binarize the output logits
-            predictions_tanh = torch.tanh(raw_logits)
-            predictions_scaled_binary = torch.where(
-                predictions_tanh > 0, torch.tensor(1.0, device=self.device), torch.tensor(-1.0, device=self.device)
-            )
+            # Convert raw predictions back to original encoding's format
+            if self.config.encoding_type == "bin":
+                predictions_tanh = torch.tanh(raw_predictions)
+                # Hard binarization to -1/1
+                predictions_scaled_binary = torch.where(
+                    predictions_tanh > 0, torch.tensor(1.0, device=self.device), torch.tensor(-1.0, device=self.device)
+                )
+                # Convert back from -1/1 to 0/1
+                final_predictions = (predictions_scaled_binary + 1.0) / 2.0
+            elif self.config.encoding_type == "sas":
+                # For SAS+, round to nearest integer and clamp to valid range [-1, num_blocks]
+                # Valid SAS+ values: -1 (held), 0 (table), 1..num_blocks (on b1..bN)
+                max_valid_sas_value = self.config.num_blocks  # Needs to be defined based on N
+                final_predictions = torch.round(raw_predictions).clamp(min=-1, max=max_valid_sas_value).long()
+            else:
+                raise ValueError(f"Unsupported encoding type: {self.config.encoding_type}")
 
-            # Convert back from -1/1 to 0/1 for the return value
-            predictions_original_binary = (predictions_scaled_binary + 1.0) / 2.0
-
-        return predictions_original_binary
+        return final_predictions
 
     def save(self, path: Path):
         """Save model weights and configuration"""
@@ -381,6 +436,10 @@ class BlocksWorldTTM:
         with open(config_path, "r") as f:
             config_dict = json.load(f)
 
+        # Add default values for new fields if loading an old config (for backward compatibility)
+        config_dict.setdefault("encoding_type", "bin")
+        config_dict.setdefault("num_blocks", None)
+
         # Ensure all required fields for ModelConfig are present
         try:
             loaded_model_config = ModelConfig(**config_dict)
@@ -391,6 +450,8 @@ class BlocksWorldTTM:
 
         if loaded_model_config.state_dim is None:
             raise ValueError("Loaded model config must contain 'state_dim'.")
+        if loaded_model_config.encoding_type == "sas" and loaded_model_config.num_blocks is None:
+            raise ValueError("Loaded model config for SAS+ must contain 'num_blocks'.")
 
         instance = cls(model_config=loaded_model_config, device=device, output_dir=path)
 
@@ -413,7 +474,7 @@ class BlocksWorldTTM:
         try:
             get_model_params["return_model_key"] = True
             instance.model_name = str(get_model(**get_model_params))
-        except Exception:
+        except Exception:  # Fallback if model key cannot be determined (e.g., local path)
             instance.model_name = Path(instance.config.ttm_model_path).name
 
         logger.info(f"Model loaded successfully from {path}. Base TTM: {instance.model_name}")

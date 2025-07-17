@@ -79,6 +79,10 @@ class TTMWrapper(PlannableModel):
             # Convert numpy inputs to torch tensors and MOVE TO THE CORRECT DEVICE
             initial_state_tensor = torch.from_numpy(initial_state_np.astype(np.float32)).unsqueeze(0).to(self.device)
             goal_state_tensor = torch.from_numpy(goal_state_np.astype(np.float32)).unsqueeze(0).to(self.device)
+            # For SAS+, inputs will be integer, so ensure they are passed as LongTensor before potentially being cast to float by TTM.predict
+            if self.ttm_instance.config.encoding_type == "sas":
+                initial_state_tensor = initial_state_tensor.long()
+                goal_state_tensor = goal_state_tensor.long()
 
             # Initialize the context by repeating the initial state
             # This will now be on the correct device because initial_state_tensor is
@@ -98,7 +102,7 @@ class TTMWrapper(PlannableModel):
                 # Stagnation check: if the model predicts no change, stop.
                 # This prevents infinitely long plans of repeating states.
                 last_state_in_context = current_context[:, -1, :]
-                if torch.equal(next_state, last_state_in_context):
+                if torch.equal(next_state, last_state_in_context.to(next_state.dtype)):  # Ensure type match for comparison
                     # print(f"TTM: Stagnation detected at step {step + 1}. Stopping.")
                     break
 
@@ -107,10 +111,12 @@ class TTMWrapper(PlannableModel):
                 # Update the context for the next iteration:
                 # Roll the context to the left and append the new state at the end
                 current_context = torch.roll(current_context, shifts=-1, dims=1)
-                current_context[:, -1, :] = next_state
+                current_context[:, -1, :] = next_state.to(current_context.dtype)  # Ensure type match for assignment
 
                 # Goal achievement check
-                if torch.equal(next_state.squeeze(0), goal_state_tensor.squeeze(0)):
+                if torch.equal(
+                    next_state.squeeze(0), goal_state_tensor.squeeze(0).to(next_state.dtype)
+                ):  # Ensure type match for comparison
                     # print(f"TTM: Goal reached at step {step + 1}.")
                     break
 

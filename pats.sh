@@ -56,6 +56,7 @@ python -m scripts.train_model \
     --batch_size 32 \
     --learning_rate 0.001 \
     --seed 13 \
+    --xgboost_context_window_size 3
 
 echo -e "\n"
 echo "Training completed. Outputs in $output_dir"
@@ -70,7 +71,8 @@ python -m scripts.benchmark \
     --output_dir $benchmark_output_dir \
     --encoding_type $encoding \
     --max_plan_length 60 \
-    --save_detailed_results
+    --save_detailed_results \
+    --xgboost_context_window_size 3
 
 echo -e "\n"
 echo "Benchmarking completed. Results in $benchmark_output_dir"

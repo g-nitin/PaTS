@@ -239,47 +239,85 @@ class LSTMWrapper(PlannableModel):
 
 
 class XGBoostWrapper(PlannableModel):
-    def __init__(self, model_path: Path, num_blocks: int, device: torch.device, encoding_type: str, seed: int):
+    def __init__(
+        self,
+        model_path: Path,
+        num_blocks: int,
+        device: torch.device,
+        encoding_type: str,
+        seed: int,
+        context_window_size: int = 1,
+    ):
         # XGBoost is CPU-bound, so device is not used but kept for interface consistency
         super().__init__(model_path, num_blocks, device)
         self.planner: XGBoostPlanner
         self.encoding_type = encoding_type
         self.seed = seed
+        self.context_window_size = context_window_size
         self._state_dim: Optional[int] = None
+        self.loaded_context_window_size: int = (
+            context_window_size  # This will be updated from the loaded model's config if available
+        )
 
     def load_model(self):
         print(f"Loading XGBoost model from: {self.model_path}")
         self.planner = XGBoostPlanner.load(
             self.model_path, encoding_type=self.encoding_type, num_blocks=self.num_blocks, seed=self.seed
         )
+        # Retrieve context_window_size from loaded model if it was saved with it
+        if hasattr(self.planner, "context_window_size"):
+            self.loaded_context_window_size = self.planner.context_window_size
+        else:
+            # Fallback for old models or if not saved. Warn user.
+            print(
+                f"Warning: 'context_window_size' not found in loaded XGBoost model. Using default: {self.loaded_context_window_size}"
+            )
+
         # Infer state_dim from the loaded model's structure
-        if self.encoding_type == "bin":
-            # Input to model is (current_state + goal_state), so divide by 2
-            self._state_dim = self.planner.model.estimators_[0].n_features_in_ // 2  # type: ignore
+        # Input to model is (context_window_size * state_dim + goal_state_dim)
+        if self.encoding_type == "bin":  # For binary, state_dim is the number of predicates
+            total_input_features = self.planner.model.estimators_[0].n_features_in_  # type: ignore
+            self._state_dim = total_input_features // (self.loaded_context_window_size + 1)
+
         elif self.encoding_type == "sas":
             self._state_dim = self.num_blocks
 
         self.model = self.planner.model  # For consistency
-        print(f"XGBoost model loaded. State dim inferred as: {self._state_dim}")
+        print(
+            f"XGBoost model loaded. State dim inferred as: {self._state_dim}. Context window size: {self.loaded_context_window_size}"
+        )
 
     def predict_sequence(self, initial_state_np: np.ndarray, goal_state_np: np.ndarray, max_length: int) -> List[List[int]]:
         if self.planner is None:
             raise RuntimeError("XGBoost model not loaded. Call load_model() first.")
 
         plan = [initial_state_np]
-        current_state = initial_state_np
 
-        for _ in range(max_length - 1):
-            X_input = np.concatenate([current_state, goal_state_np]).reshape(1, -1)
+        # Maintain a deque or list for the sliding context window
+        current_context_window = [initial_state_np] * self.loaded_context_window_size  # Initialize with S0 repeated
+
+        for _ in range(max_length - 1):  # max_length includes S0
+            # Construct the input for prediction
+            # The context window should contain the last `loaded_context_window_size` states
+            X_input_parts = current_context_window + [goal_state_np]
+            X_input = np.concatenate(X_input_parts).reshape(1, -1)
+
             next_state = self.planner.predict(X_input).flatten()
 
-            if np.array_equal(current_state, next_state):
+            # Stagnation check: if the model predicts no change from the last state in the plan
+            if np.array_equal(plan[-1], next_state):
+                # print(f"XGBoost: Stagnation detected at step {len(plan)}. Stopping.")
                 break
 
             plan.append(next_state)
-            current_state = next_state
 
-            if np.array_equal(current_state, goal_state_np):
+            # Update the context window: remove oldest, add newest
+            current_context_window.pop(0)
+            current_context_window.append(next_state)
+
+            # Goal achievement check
+            if np.array_equal(next_state, goal_state_np):
+                # print(f"XGBoost: Goal reached at step {len(plan) - 1}.")
                 break
 
         return [state.tolist() for state in plan]  # type: ignore
@@ -375,7 +413,13 @@ def compute_timeseries_metrics(
 
 
 def get_plannable_model(
-    model_type: str, model_path: Path, num_blocks: int, device: torch.device, encoding_type: str, seed: int
+    model_type: str,
+    model_path: Path,
+    num_blocks: int,
+    device: torch.device,
+    encoding_type: str,
+    seed: int,
+    context_window_size: int,
 ) -> PlannableModel:
     """Factory function to get a PlannableModel instance."""
     model_type_lower = model_type.lower()
@@ -384,7 +428,7 @@ def get_plannable_model(
     elif model_type_lower == "lstm":
         return LSTMWrapper(model_path, num_blocks, device)
     elif model_type_lower == "xgboost":
-        return XGBoostWrapper(model_path, num_blocks, device, encoding_type, seed)
+        return XGBoostWrapper(model_path, num_blocks, device, encoding_type, seed, context_window_size)
     # elif model_type_lower == "plansformer":
     #     # return PlansformerWrapper(model_path, num_blocks, device) # Placeholder
     #     raise NotImplementedError("Plansformer wrapper not yet implemented.")
@@ -556,7 +600,13 @@ def run_benchmark(args: argparse.Namespace):
     # Initialize Model
     try:
         wrapped_model: PlannableModel = get_plannable_model(
-            model_type, model_path, num_blocks, DEVICE, args.encoding_type, args.seed
+            model_type,
+            model_path,
+            num_blocks,
+            DEVICE,
+            args.encoding_type,
+            args.seed,
+            context_window_size=args.xgboost_context_window_size,
         )
     except ValueError as e:
         print(f"ERROR: Could not initialize model: {e}")
@@ -709,6 +759,12 @@ if __name__ == "__main__":
         type=int,
         default=13,
         help="Random seed, mainly for XGBoost model initialization consistency. Default is 13.",
+    )
+    parser.add_argument(
+        "--xgboost_context_window_size",
+        type=int,
+        default=1,
+        help="Number of past states to include in XGBoost input features. Must match training.",
     )
 
     cli_args = parser.parse_args()

@@ -253,25 +253,37 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
     print("LSTM Training finished.")
 
 
-def prepare_data_for_xgboost(dataset: PaTSDataset) -> Tuple[np.ndarray, np.ndarray]:
+def prepare_data_for_xgboost(dataset: PaTSDataset, context_window_size: int) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Flattens the sequential dataset into a tabular format (X, y) for XGBoost.
-    X = (current_state, goal_state)
-    y = next_state
+    Flattens the sequential dataset into a tabular format (X, y) for XGBoost,
+    including a context window of past states.
+    X = (S_{t-k+1}, ..., S_t, S_G)
+    y = S_{t+1}
     """
     X_list, y_list = [], []
     for i in range(len(dataset)):
         item = dataset[i]
-        trajectory = item["expert_trajectory"]
-        goal_state = item["goal_state"]
+        trajectory = item["expert_trajectory"]  # (L, F)
+        goal_state = item["goal_state"]  # (F,)
+        initial_state = item["initial_state"]  # (F,)
 
-        # Create (S_t, S_G) -> S_{t+1} pairs
-        for t in range(len(trajectory) - 1):
+        # Create (S_{t-k+1}, ..., S_t, S_G) -> S_{t+1} pairs
+        for t in range(len(trajectory) - 1):  # Iterate from S_0 to S_{L-2} to predict S_1 to S_{L-1}
             current_state = trajectory[t]
             next_state = trajectory[t + 1]
 
-            # Concatenate current state and goal state to form the feature vector X
-            X_sample = np.concatenate([current_state, goal_state])
+            # Build the context window for S_t
+            context_states = []
+            for j in range(context_window_size):
+                idx_in_traj = t - (context_window_size - 1 - j)
+                if idx_in_traj >= 0:
+                    context_states.append(trajectory[idx_in_traj])
+                else:
+                    # Pad with initial_state if not enough history
+                    context_states.append(initial_state)
+
+            # Concatenate context states and goal state to form the feature vector X
+            X_sample = np.concatenate(context_states + [goal_state])
             X_list.append(X_sample)
             y_list.append(next_state)
 
@@ -329,6 +341,12 @@ def main():
         "--mlm_mask_prob", type=float, default=0.15, help="Probability of masking a predicate for the MLM task."
     )
     parser.add_argument("--lstm_embedding_dim", type=int, default=32, help="Embedding dimension for SAS+ encoding.")
+    parser.add_argument(
+        "--use_constraint_loss", action="store_true", help="Enable constraint violation auxiliary loss for LSTM."
+    )
+    parser.add_argument(
+        "--constraint_loss_weight", type=float, default=1.0, help="Weight for the constraint violation auxiliary loss."
+    )
 
     # TTM specific arguments
     parser.add_argument(
@@ -351,11 +369,12 @@ def main():
         help="Logging level for TTM.",
     )
 
+    # XGBoost specific arguments
     parser.add_argument(
-        "--use_constraint_loss", action="store_true", help="Enable constraint violation auxiliary loss for LSTM."
-    )
-    parser.add_argument(
-        "--constraint_loss_weight", type=float, default=1.0, help="Weight for the constraint violation auxiliary loss."
+        "--xgboost_context_window_size",
+        type=int,
+        default=1,
+        help="Number of past states to include in XGBoost input features. Default is 1 (current state only).",
     )
 
     args = parser.parse_args()
@@ -545,14 +564,19 @@ def main():
 
         # 1. Prepare data in tabular format
         print("Preparing data for XGBoost...")
-        X_train, y_train = prepare_data_for_xgboost(train_dataset)
+        X_train, y_train = prepare_data_for_xgboost(train_dataset, args.xgboost_context_window_size)
 
         if X_train.shape[0] == 0:
             print("ERROR: No training data could be generated for XGBoost. Exiting.")
             sys.exit(1)
 
         # 2. Initialize and train the model
-        planner = XGBoostPlanner(encoding_type=args.encoding_type, num_blocks=args.num_blocks, seed=args.seed)
+        planner = XGBoostPlanner(
+            encoding_type=args.encoding_type,
+            num_blocks=args.num_blocks,
+            seed=args.seed,
+            context_window_size=args.xgboost_context_window_size,
+        )
 
         planner.train(X_train, y_train)
 

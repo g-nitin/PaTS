@@ -14,7 +14,7 @@ class XGBoostPlanner:
     It uses scikit-learn's MultiOutputClassifier for convenience.
     """
 
-    def __init__(self, encoding_type="bin", num_blocks: Optional[int] = None, seed=42):
+    def __init__(self, encoding_type="bin", num_blocks: Optional[int] = None, seed=42, context_window_size: int = 1):
         self.encoding_type = encoding_type
         self.num_blocks = num_blocks
         self.seed = seed
@@ -22,6 +22,7 @@ class XGBoostPlanner:
         self.label_encoders = None  # For SAS+ encoding
 
         if self.encoding_type == "bin":
+            self.context_window_size = context_window_size
             # Multi-label classification problem
             xgb_estimator = xgb.XGBClassifier(  # type: ignore
                 objective="binary:logistic", eval_metric="logloss", random_state=self.seed
@@ -30,6 +31,7 @@ class XGBoostPlanner:
         elif self.encoding_type == "sas":
             if num_blocks is None:
                 raise ValueError("num_blocks must be provided for SAS+ encoding.")
+            self.context_window_size = context_window_size
             # Multi-output classification problem
             xgb_estimator = xgb.XGBClassifier(  # type: ignore
                 objective="multi:softprob", eval_metric="mlogloss", random_state=self.seed
@@ -92,19 +94,37 @@ class XGBoostPlanner:
     def save(self, path: Path):
         """Saves the trained model and label encoders to a file."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        save_data = {"model": self.model, "label_encoders": self.label_encoders}
+        save_data = {
+            "model": self.model,
+            "label_encoders": self.label_encoders,
+            "encoding_type": self.encoding_type,  # Save these for robust loading
+            "num_blocks": self.num_blocks,  # Save these for robust loading
+            "context_window_size": self.context_window_size,  # Save new attribute
+        }
         joblib.dump(save_data, path)
         print(f"XGBoost model saved to {path}")
 
     @classmethod
-    def load(cls, path: Path, encoding_type: str, num_blocks: int, seed: int) -> "XGBoostPlanner":
+    def load(cls, path: Path, encoding_type: str, num_blocks: int, seed: int):
         """Loads a model from a file."""
         if not path.is_file():
             raise FileNotFoundError(f"Model file not found at {path}")
 
-        instance = cls(encoding_type=encoding_type, num_blocks=num_blocks, seed=seed)
-
         load_data = joblib.load(path)
+
+        # Retrieve parameters from saved data for initialization
+        # This makes loading more robust, as the init parameters are derived from the saved model
+        loaded_encoding_type = load_data.get("encoding_type", encoding_type)  # Fallback to passed arg for old models
+        loaded_num_blocks = load_data.get("num_blocks", num_blocks)  # Fallback to passed arg for old models
+        loaded_context_window_size = load_data.get("context_window_size", 1)  # Fallback to default for old models
+
+        instance = cls(
+            encoding_type=loaded_encoding_type,
+            num_blocks=loaded_num_blocks,
+            seed=seed,  # Seed is not saved, always passed
+            context_window_size=loaded_context_window_size,
+        )
+
         instance.model = load_data["model"]
         instance.label_encoders = load_data["label_encoders"]
 

@@ -25,7 +25,7 @@ version = "0.1.0"
 py-modules = []
 
 # Steps:
-# 1. Activate conda environment first (conda activate pats-env)
+# 1. `conda activate pats-env`
 # 2. `pip install -e .`: Install manually install to env (conda, etc.) with pip.
 # 3. `pip install "granite-tsfm[notebooks] @ git+https://github.com/ibm-granite/granite-tsfm.git@v0.2.22"`
 # 4. `conda deactivate`

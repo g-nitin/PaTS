@@ -7,13 +7,14 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-from fastdtw import fastdtw
+from fastdtw import fastdtw  # type: ignore
 from scipy.spatial.distance import hamming
 
 from .BlocksWorldValidator import BlocksWorldValidator, ValidationResult
 from .models.lstm import PaTS_LSTM
 from .models.ttm import BlocksWorldTTM
 from .models.ttm import ModelConfig as TTMModelConfig
+from .models.xgboost import XGBoostPlanner
 
 # Setup device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
@@ -54,7 +55,6 @@ class PlannableModel(ABC):
         pass
 
 
-# ** TTM Wrapper **
 class TTMWrapper(PlannableModel):
     def __init__(self, model_path: Path, num_blocks: int, device: torch.device):
         super().__init__(model_path, num_blocks, device)
@@ -135,7 +135,6 @@ class TTMWrapper(PlannableModel):
         return self.config.state_dim
 
 
-# ** LSTM Wrapper **
 class LSTMWrapper(PlannableModel):
     def __init__(self, model_path: Path, num_blocks: int, device: torch.device):
         super().__init__(model_path, num_blocks, device)
@@ -239,6 +238,63 @@ class LSTMWrapper(PlannableModel):
         return self._state_dim
 
 
+class XGBoostWrapper(PlannableModel):
+    def __init__(self, model_path: Path, num_blocks: int, device: torch.device, encoding_type: str, seed: int):
+        # XGBoost is CPU-bound, so device is not used but kept for interface consistency
+        super().__init__(model_path, num_blocks, device)
+        self.planner: XGBoostPlanner
+        self.encoding_type = encoding_type
+        self.seed = seed
+        self._state_dim: Optional[int] = None
+
+    def load_model(self):
+        print(f"Loading XGBoost model from: {self.model_path}")
+        self.planner = XGBoostPlanner.load(
+            self.model_path, encoding_type=self.encoding_type, num_blocks=self.num_blocks, seed=self.seed
+        )
+        # Infer state_dim from the loaded model's structure
+        if self.encoding_type == "bin":
+            # Input to model is (current_state + goal_state), so divide by 2
+            self._state_dim = self.planner.model.estimators_[0].n_features_in_ // 2  # type: ignore
+        elif self.encoding_type == "sas":
+            self._state_dim = self.num_blocks
+
+        self.model = self.planner.model  # For consistency
+        print(f"XGBoost model loaded. State dim inferred as: {self._state_dim}")
+
+    def predict_sequence(self, initial_state_np: np.ndarray, goal_state_np: np.ndarray, max_length: int) -> List[List[int]]:
+        if self.planner is None:
+            raise RuntimeError("XGBoost model not loaded. Call load_model() first.")
+
+        plan = [initial_state_np]
+        current_state = initial_state_np
+
+        for _ in range(max_length - 1):
+            X_input = np.concatenate([current_state, goal_state_np]).reshape(1, -1)
+            next_state = self.planner.predict(X_input).flatten()
+
+            if np.array_equal(current_state, next_state):
+                break
+
+            plan.append(next_state)
+            current_state = next_state
+
+            if np.array_equal(current_state, goal_state_np):
+                break
+
+        return [state.tolist() for state in plan]  # type: ignore
+
+    @property
+    def model_name(self) -> str:
+        return "PaTS_XGBoost"
+
+    @property
+    def state_dim(self) -> int:
+        if self._state_dim is None:
+            raise ValueError("XGBoost model not loaded or state_dim not inferred.")
+        return self._state_dim
+
+
 def compute_timeseries_metrics(
     predicted_plan: List[List[int]], expert_plan: np.ndarray, encoding_type: str
 ) -> Dict[str, float]:
@@ -318,13 +374,17 @@ def compute_timeseries_metrics(
     }
 
 
-def get_plannable_model(model_type: str, model_path: Path, num_blocks: int, device: torch.device) -> PlannableModel:
+def get_plannable_model(
+    model_type: str, model_path: Path, num_blocks: int, device: torch.device, encoding_type: str, seed: int
+) -> PlannableModel:
     """Factory function to get a PlannableModel instance."""
     model_type_lower = model_type.lower()
     if model_type_lower == "ttm":
         return TTMWrapper(model_path, num_blocks, device)
     elif model_type_lower == "lstm":
         return LSTMWrapper(model_path, num_blocks, device)
+    elif model_type_lower == "xgboost":
+        return XGBoostWrapper(model_path, num_blocks, device, encoding_type, seed)
     # elif model_type_lower == "plansformer":
     #     # return PlansformerWrapper(model_path, num_blocks, device) # Placeholder
     #     raise NotImplementedError("Plansformer wrapper not yet implemented.")
@@ -495,7 +555,9 @@ def run_benchmark(args: argparse.Namespace):
 
     # Initialize Model
     try:
-        wrapped_model: PlannableModel = get_plannable_model(model_type, model_path, num_blocks, DEVICE)
+        wrapped_model: PlannableModel = get_plannable_model(
+            model_type, model_path, num_blocks, DEVICE, args.encoding_type, args.seed
+        )
     except ValueError as e:
         print(f"ERROR: Could not initialize model: {e}")
         return  # or exit
@@ -625,7 +687,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num_blocks", type=int, required=True, help="Number of blocks for the problems to benchmark.")
     parser.add_argument(
-        "--model_type", type=str, required=True, choices=["ttm", "lstm"], help="Type of model to benchmark."
+        "--model_type", type=str, required=True, choices=["ttm", "lstm", "xgboost"], help="Type of model to benchmark."
     )
     parser.add_argument(
         "--model_path", type=str, required=True, help="Path to the trained model directory (TTM) or .pth file (LSTM)."
@@ -642,6 +704,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--max_plan_length", type=int, default=50, help="Maximum plan length for model generation.")
     parser.add_argument("--save_detailed_results", action="store_true", help="Save detailed results for each problem.")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=13,
+        help="Random seed, mainly for XGBoost model initialization consistency. Default is 13.",
+    )
 
     cli_args = parser.parse_args()
     run_benchmark(cli_args)

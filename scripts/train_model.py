@@ -5,6 +5,7 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 from pprint import pprint
+from typing import Tuple
 
 import numpy as np
 import torch
@@ -18,6 +19,7 @@ from scripts.models.lstm import PaTS_LSTM, lstm_collate_fn
 from scripts.models.ttm import BlocksWorldTTM, determine_ttm_model
 from scripts.models.ttm import ModelConfig as TTMModelConfig
 from scripts.models.ttm import setup_logging as ttm_setup_logging
+from scripts.models.xgboost import XGBoostPlanner
 from scripts.pats_dataset import PaTSDataset
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
@@ -124,7 +126,7 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
 
             loss_constraint = torch.tensor(0.0).to(DEVICE)
             if args.encoding_type != "sas" and args.use_constraint_loss and validator is not None:
-                masked_logits = forecasting_logits[forecasting_mask[:, :, 0]]
+                masked_logits = forecasting_logits[forecasting_mask[:, :, 0]]  # type: ignore
                 if masked_logits.ndim == 2 and masked_logits.shape[0] > 0:
                     loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
 
@@ -204,7 +206,7 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
 
                     loss_constraint = torch.tensor(0.0).to(DEVICE)
                     if args.encoding_type != "sas" and args.use_constraint_loss and validator is not None:
-                        masked_logits = forecasting_logits[forecasting_mask[:, :, 0]]
+                        masked_logits = forecasting_logits[forecasting_mask[:, :, 0]]  # type: ignore
                         if masked_logits.ndim == 2 and masked_logits.shape[0] > 0:
                             loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
 
@@ -251,13 +253,40 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
     print("LSTM Training finished.")
 
 
+def prepare_data_for_xgboost(dataset: PaTSDataset) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Flattens the sequential dataset into a tabular format (X, y) for XGBoost.
+    X = (current_state, goal_state)
+    y = next_state
+    """
+    X_list, y_list = [], []
+    for i in range(len(dataset)):
+        item = dataset[i]
+        trajectory = item["expert_trajectory"]
+        goal_state = item["goal_state"]
+
+        # Create (S_t, S_G) -> S_{t+1} pairs
+        for t in range(len(trajectory) - 1):
+            current_state = trajectory[t]
+            next_state = trajectory[t + 1]
+
+            # Concatenate current state and goal state to form the feature vector X
+            X_sample = np.concatenate([current_state, goal_state])
+            X_list.append(X_sample)
+            y_list.append(next_state)
+
+    return np.array(X_list), np.array(y_list)
+
+
 def main():
     print("Starting unified training script for PaTS models...")
 
     parser = argparse.ArgumentParser(description="Unified Training Script for PaTS Models")
 
     # Common arguments
-    parser.add_argument("--model_type", type=str, required=True, choices=["lstm", "ttm"], help="Type of model to train.")
+    parser.add_argument(
+        "--model_type", type=str, required=True, choices=["lstm", "ttm", "xgboost"], help="Type of model to train."
+    )
     parser.add_argument(
         "--dataset_dir",
         type=Path,
@@ -510,6 +539,27 @@ def main():
         print(f"Saving TTM model assets to {final_model_assets_path}")
         ttm_trainer_instance.save(final_model_assets_path)
         print("TTM Training finished.")
+
+    elif args.model_type == "xgboost":
+        print("Starting XGBoost training setup...")
+
+        # 1. Prepare data in tabular format
+        print("Preparing data for XGBoost...")
+        X_train, y_train = prepare_data_for_xgboost(train_dataset)
+
+        if X_train.shape[0] == 0:
+            print("ERROR: No training data could be generated for XGBoost. Exiting.")
+            sys.exit(1)
+
+        # 2. Initialize and train the model
+        planner = XGBoostPlanner(encoding_type=args.encoding_type, num_blocks=args.num_blocks, seed=args.seed)
+
+        planner.train(X_train, y_train)
+
+        # 3. Save the model
+        model_save_path = model_specific_output_dir / f"pats_xgboost_model_N{args.num_blocks}.joblib"
+        planner.save(model_save_path)
+        print("XGBoost training finished.")
 
     else:
         print(f"Unknown model type: {args.model_type}")

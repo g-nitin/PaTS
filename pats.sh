@@ -17,7 +17,7 @@ echo $CONDA_DEFAULT_ENV
 hostname
 echo "Python version: $(python --version)"
 
-model_type='lstm'  # `lstm`, `ttm`
+model_type='xgboost'  # `lstm`, `ttm`, `xgboost`
 num_blocks=4
 encoding='sas'  # `sas`, `bin`
 dataset_dir="data/blocks_${num_blocks}-${encoding}"
@@ -33,6 +33,9 @@ if [ "$model_type" = 'lstm' ]; then
 elif [ "$model_type" = 'ttm' ]; then
     echo "Using TTM model"
     model_path="${output_dir}/${model_type}_N${num_blocks}/final_model_assets"
+elif [ "$model_type" = 'xgboost' ]; then
+    echo "Using XGBoost model"
+    model_path="${output_dir}/${model_type}_N${num_blocks}/pats_xgboost_model_N${num_blocks}.joblib"
 else
     echo "Unsupported model type: $model_type"
     exit 1

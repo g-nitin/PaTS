@@ -1,6 +1,5 @@
 import argparse
 import json
-from abc import ABC, abstractmethod
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -11,48 +10,16 @@ from fastdtw import fastdtw  # type: ignore
 from scipy.spatial.distance import hamming
 
 from .BlocksWorldValidator import BlocksWorldValidator, ValidationResult
+from .models.llama import LlamaWrapper
 from .models.lstm import PaTS_LSTM
 from .models.ttm import BlocksWorldTTM
 from .models.ttm import ModelConfig as TTMModelConfig
 from .models.xgboost import XGBoostPlanner
+from .PlannableModel import PlannableModel
 
 # Setup device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 print(f"Benchmarking using device: {DEVICE}")
-
-
-# ** Abstract Plannable Model **
-class PlannableModel(ABC):
-    def __init__(self, model_path: Path, num_blocks: int, device: torch.device):
-        self.model_path = model_path
-        self.num_blocks = num_blocks
-        self.device = device
-        self.model: Any = None  # To be initialized by load_model
-
-    @abstractmethod
-    def load_model(self):
-        """Loads the model from self.model_path."""
-        pass
-
-    @abstractmethod
-    def predict_sequence(self, initial_state_np: np.ndarray, goal_state_np: np.ndarray, max_length: int) -> List[List[int]]:
-        """
-        Predicts a sequence of states (plan).
-        Inputs are 0/1 numpy arrays. Output is List of 0/1 state lists.
-        """
-        pass
-
-    @property
-    @abstractmethod
-    def model_name(self) -> str:
-        """Returns a descriptive name of the model."""
-        pass
-
-    @property
-    @abstractmethod
-    def state_dim(self) -> int:
-        """Returns the feature dimension of the states the model expects/produces."""
-        pass
 
 
 class TTMWrapper(PlannableModel):
@@ -420,6 +387,7 @@ def get_plannable_model(
     encoding_type: str,
     seed: int,
     context_window_size: int,
+    dataset_dir: Path,
 ) -> PlannableModel:
     """Factory function to get a PlannableModel instance."""
     model_type_lower = model_type.lower()
@@ -429,6 +397,10 @@ def get_plannable_model(
         return LSTMWrapper(model_path, num_blocks, device)
     elif model_type_lower == "xgboost":
         return XGBoostWrapper(model_path, num_blocks, device, encoding_type, seed, context_window_size)
+    elif model_type_lower == "llama":
+        # For Llama, model_path is the model_id string.
+        # dataset_dir is needed by LlamaWrapper to fetch a one-shot example.
+        return LlamaWrapper(str(model_path), num_blocks, device, encoding_type, dataset_dir)
     # elif model_type_lower == "plansformer":
     #     # return PlansformerWrapper(model_path, num_blocks, device) # Placeholder
     #     raise NotImplementedError("Plansformer wrapper not yet implemented.")
@@ -549,6 +521,7 @@ def run_benchmark(args: argparse.Namespace):
     data_root_dir = Path(args.dataset_dir)
     num_blocks = args.num_blocks
     model_type = args.model_type
+    data_root_dir = Path(args.dataset_dir)
     model_path = Path(args.model_path)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -607,6 +580,7 @@ def run_benchmark(args: argparse.Namespace):
             args.encoding_type,
             args.seed,
             context_window_size=args.xgboost_context_window_size,
+            dataset_dir=data_root_dir,
         )
     except ValueError as e:
         print(f"ERROR: Could not initialize model: {e}")
@@ -737,7 +711,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--num_blocks", type=int, required=True, help="Number of blocks for the problems to benchmark.")
     parser.add_argument(
-        "--model_type", type=str, required=True, choices=["ttm", "lstm", "xgboost"], help="Type of model to benchmark."
+        "--model_type",
+        type=str,
+        required=True,
+        choices=["ttm", "lstm", "xgboost", "llama"],
+        help="Type of model to benchmark.",
     )
     parser.add_argument(
         "--model_path", type=str, required=True, help="Path to the trained model directory (TTM) or .pth file (LSTM)."

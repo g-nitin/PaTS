@@ -388,6 +388,7 @@ def get_plannable_model(
     seed: int,
     context_window_size: int,
     dataset_dir: Path,
+    llama_use_few_shot: bool = True,
 ) -> PlannableModel:
     """Factory function to get a PlannableModel instance."""
     model_type_lower = model_type.lower()
@@ -400,7 +401,9 @@ def get_plannable_model(
     elif model_type_lower == "llama":
         # For Llama, model_path is the model_id string.
         # dataset_dir is needed by LlamaWrapper to fetch a one-shot example.
-        return LlamaWrapper(str(model_path), num_blocks, device, encoding_type, dataset_dir)
+        return LlamaWrapper(
+            str(model_path), num_blocks, device, encoding_type, dataset_dir, use_few_shot_example=llama_use_few_shot
+        )
     # elif model_type_lower == "plansformer":
     #     # return PlansformerWrapper(model_path, num_blocks, device) # Placeholder
     #     raise NotImplementedError("Plansformer wrapper not yet implemented.")
@@ -539,6 +542,9 @@ def run_benchmark(args: argparse.Namespace):
 
     print(f"Found {len(problem_basenames)} test problems for N={num_blocks}.")
 
+    # problem_basenames = problem_basenames[:1]
+    # print(f"~~Cutting length to {len(problem_basenames)}~~")
+
     # Initialize Validator
     print(f"Initializing validator for N={num_blocks} with '{args.encoding_type}' encoding.")
 
@@ -581,6 +587,7 @@ def run_benchmark(args: argparse.Namespace):
             args.seed,
             context_window_size=args.xgboost_context_window_size,
             dataset_dir=data_root_dir,
+            llama_use_few_shot=args.llama_use_few_shot,
         )
     except ValueError as e:
         print(f"ERROR: Could not initialize model: {e}")
@@ -743,6 +750,11 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Number of past states to include in XGBoost input features. Must match training.",
+    )
+    parser.add_argument(
+        "--llama_use_few_shot",
+        action="store_true",
+        help="For Llama models, include a one-shot example in the prompt for few-shot inference.",
     )
 
     cli_args = parser.parse_args()

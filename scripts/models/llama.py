@@ -5,7 +5,6 @@ from typing import List, Optional
 import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.utils.quantization_config import BitsAndBytesConfig
 
 from ..pats_dataset import PaTSDataset
 
@@ -14,8 +13,6 @@ from ..PlannableModel import PlannableModel
 
 # Suppress some transformers warnings for cleaner output during benchmarking
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
-
-# from ..BlocksWorldValidator import BlocksWorldValidator # Not directly needed in LlamaWrapper but good to know for context
 
 # Global model and tokenizer instances to avoid reloading for every prediction call.
 # This optimization is crucial for LLMs during repeated inference.
@@ -32,16 +29,6 @@ def get_llama_model_and_tokenizer(model_id: str, device: torch.device):
     if _llama_model is None or _llama_tokenizer is None:
         print(f"Loading Llama model '{model_id}' and tokenizer. This may take a while...")
 
-        # Configure BitsAndBytes for 4-bit quantization if CUDA is available
-        bnb_config = None
-        if device.type == "cuda":
-            bnb_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.bfloat16,
-                bnb_4bit_use_double_quant=True,
-            )
-
         _llama_tokenizer = AutoTokenizer.from_pretrained(model_id)
         # Ensure pad_token is set for generation if not present
         if _llama_tokenizer.pad_token is None:
@@ -52,9 +39,9 @@ def get_llama_model_and_tokenizer(model_id: str, device: torch.device):
 
         _llama_model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            quantization_config=bnb_config,
-            torch_dtype=torch.bfloat16,  # Use bfloat16 for computation if not quantized, or as bnb_4bit_compute_dtype
-            device_map="auto",  # Distributes model across available GPUs or CPU
+            # quantization_config=bnb_config, # REMOVE THIS LINE
+            torch_dtype=torch.bfloat16,  # Keep this for bfloat16 precision
+            device_map="auto",  # Keep this for automatic device mapping
         )
         _llama_model.eval()  # Set to evaluation mode
         print("Llama model loaded.")
@@ -67,7 +54,15 @@ class LlamaWrapper(PlannableModel):
     Performs one-shot learning by embedding an example in the prompt.
     """
 
-    def __init__(self, model_id: str, num_blocks: int, device: torch.device, encoding_type: str, dataset_dir: Path):
+    def __init__(
+        self,
+        model_id: str,
+        num_blocks: int,
+        device: torch.device,
+        encoding_type: str,
+        dataset_dir: Path,
+        use_few_shot_example: bool = True,
+    ):
         """
         Initializes the LlamaWrapper.
 
@@ -85,6 +80,7 @@ class LlamaWrapper(PlannableModel):
         self.example_goal_state: Optional[np.ndarray] = None
         self.example_plan_trajectory: Optional[np.ndarray] = None
         self.dataset_dir = dataset_dir  # Path to data/blocks_N/
+        self.use_few_shot_example = use_few_shot_example
 
         # Block names for SAS+ parsing/clamping if needed.
         self.block_names: List[str] = [f"b{i + 1}" for i in range(self.num_blocks)]
@@ -95,7 +91,7 @@ class LlamaWrapper(PlannableModel):
         """
         self.model, self.tokenizer = get_llama_model_and_tokenizer(self.model_id, self.device)
 
-        # Infer state dimension and load one-shot example from a small subset of the training data
+        # Infer state dimension from dataset regardless of few-shot/zero-shot
         try:
             # Use a dummy split file name to just load the first problem for state_dim inference
             # and to get an example problem-solution pair.
@@ -104,36 +100,48 @@ class LlamaWrapper(PlannableModel):
                 dataset_dir=self.dataset_dir, split_file_name="train_files.txt", encoding_type=self.encoding_type
             )
             self.state_vec_dim = temp_dataset.state_dim
-
-            if len(temp_dataset) > 0:
-                # Load one example for one-shot inference from the training set.
-                # It's crucial that this example has at least 2 states (S0, S1) for the prompt.
-                for i in range(len(temp_dataset)):
-                    example_item = temp_dataset[i]
-                    if example_item["expert_trajectory"].shape[0] >= 2:
-                        self.example_initial_state = example_item["expert_trajectory"][0]
-                        self.example_goal_state = example_item["goal_state"]
-                        self.example_plan_trajectory = example_item["expert_trajectory"]
-                        print(
-                            f"Loaded one-shot example from {example_item['id']} (trajectory length: {self.example_plan_trajectory.shape[0]})"
-                        )
-                        break
-                if self.example_plan_trajectory is None:
-                    print("Warning: No suitable one-shot example (min 2 states) found in training data.")
-                    # Fallback to a minimal dummy example if no suitable real example
-                    self._create_dummy_example()
-            else:
-                print("Warning: No training data available to load one-shot example.")
-                self._create_dummy_example()  # Create dummy example if dataset is empty
-
         except Exception as e:
-            print(f"Error loading PaTSDataset for state_dim and example: {e}")
-            self._create_dummy_example()  # Fallback to dummy example on error
+            print(f"Error loading PaTSDataset for state_dim inference: {e}")
+            # Fallback for state_vec_dim if dataset loading fails
+            self._create_dummy_example()  # This will set state_vec_dim and dummy examples
 
         if self.state_vec_dim <= 0:
             raise RuntimeError("Failed to infer state dimension. Please check dataset.")
 
-        print(f"LlamaWrapper loaded. State dimension: {self.state_vec_dim}, Encoding: {self.encoding_type}")
+        # Load one-shot example ONLY if use_few_shot_example is True
+        if self.use_few_shot_example:
+            try:
+                if len(temp_dataset) > 0:
+                    # Load one example for one-shot inference from the training set.
+                    # It's crucial that this example has at least 2 states (S0, S1) for the prompt.
+                    for i in range(len(temp_dataset)):
+                        example_item = temp_dataset[i]
+                        if example_item["expert_trajectory"].shape[0] >= 2:
+                            self.example_initial_state = example_item["expert_trajectory"][0]
+                            self.example_goal_state = example_item["goal_state"]
+                            self.example_plan_trajectory = example_item["expert_trajectory"]
+                            print(
+                                f"Loaded one-shot example from {example_item['id']} (trajectory length: {self.example_plan_trajectory.shape[0]})"
+                            )
+                            break
+                    if self.example_plan_trajectory is None:
+                        print(
+                            "Warning: No suitable one-shot example (min 2 states) found in training data. Creating dummy."
+                        )
+                        self._create_dummy_example()
+                else:
+                    print("Warning: No training data available to load one-shot example. Creating dummy.")
+                    self._create_dummy_example()
+            except Exception as e:
+                print(f"Error loading one-shot example: {e}. Creating dummy.")
+                self._create_dummy_example()
+        else:  # If not using few-shot, ensure example fields are None
+            self.example_initial_state = None
+            self.example_goal_state = None
+
+        print(
+            f"LlamaWrapper loaded. State dimension: {self.state_vec_dim}, Encoding: {self.encoding_type}, Few-shot: {self.use_few_shot_example}"
+        )
 
     def _create_dummy_example(self):
         """Creates a minimal dummy example if no real one can be loaded."""
@@ -216,37 +224,46 @@ class LlamaWrapper(PlannableModel):
         """
         if self.model is None or self.tokenizer is None:
             raise RuntimeError("Llama model or tokenizer not loaded. Call load_model() first.")
-        if self.example_initial_state is None or self.example_plan_trajectory is None or self.example_goal_state is None:
-            # Fallback if example loading failed previously.
-            print("  Warning: One-shot example not available. Creating a minimal dummy example for prediction.")
-            self._create_dummy_example()  # Ensures we have *some* example to put in prompt
 
         # Convert current problem's initial and goal states to string format
         current_state_str = self._vector_to_string(initial_state_np)
         goal_state_str = self._vector_to_string(goal_state_np)
 
-        # Prepare the one-shot example trajectory from the loaded data
-        example_S0_str = self._vector_to_string(self.example_initial_state)
-        # Use the second state from the example trajectory as the "NEXT_STATE" for the example
-        example_S1_str = self._vector_to_string(self.example_plan_trajectory[1])
-        example_SG_str = self._vector_to_string(self.example_goal_state)
+        # Base instruction for the AI
+        instruction = 'You are an expert planning AI. Your task is to generate a sequence of states to solve a planning problem in Blocksworld. You operate on numerical state representations. Given an initial state and a goal state, predict ONLY the next state in the plan, in the exact format "[num1 num2 ... numF]". Do not output any other text or explanation.'
 
-        generated_plan_list_of_lists: List[List[int]] = [initial_state_np.tolist()]  # Plan starts with S0
-
-        for step in range(max_length - 1):  # max_length includes S0, so iterate for max_length-1 steps
-            # Construct the prompt using the Llama-3-Instruct template format
-            prompt = f"""<s>[INST] You are an expert planning AI. Your task is to generate a sequence of states to solve a planning problem in Blocksworld. You operate on numerical state representations. Given an initial state and a goal state, predict ONLY the next state in the plan, in the exact format "[num1 num2 ... numF]". Do not output any other text or explanation.
-
+        # Conditionally add the example for few-shot
+        example_section = ""
+        if self.use_few_shot_example:
+            if (
+                self.example_initial_state is None
+                or self.example_plan_trajectory is None
+                or self.example_goal_state is None
+            ):
+                # This should ideally not happen if load_model was successful, but as a safeguard
+                print("  Warning: Few-shot example requested but not available. Falling back to zero-shot.")
+                self.use_few_shot_example = False  # Disable few-shot for this run
+            else:
+                example_S0_str = self._vector_to_string(self.example_initial_state)
+                example_S1_str = self._vector_to_string(self.example_plan_trajectory[1])
+                example_SG_str = self._vector_to_string(self.example_goal_state)
+                example_section = f"""
 Example:
 INITIAL_STATE: {example_S0_str}
 GOAL_STATE: {example_SG_str}
 NEXT_STATE: {example_S1_str}
+"""
 
+        # Construct the full prompt
+        prompt = f"""<s>[INST] {instruction}{example_section}
 Now, generate for the following:
 INITIAL_STATE: {current_state_str}
 GOAL_STATE: {goal_state_str}
 NEXT_STATE: [/INST]"""
 
+        generated_plan_list_of_lists: List[List[int]] = [initial_state_np.tolist()]
+
+        for step in range(max_length - 1):  # max_length includes S0, so iterate for max_length-1 steps
             inputs = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True).to(self.device)
 
             # Generate tokens

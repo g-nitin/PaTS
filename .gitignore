@@ -11,8 +11,8 @@ own/
 PaTS.egg-info/
 build/
 
-training_outputs*/*
-benchmark_results*/*
+training_outputs/
+benchmark_results/
 slurm/*
 local-run.sh
 

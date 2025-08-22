@@ -2,7 +2,7 @@
 
 #SBATCH --job-name=PaTS
 #SBATCH -o r_out%j.out
-#SBATCH r_err%j.err
+#SBATCH -e r_err%j.err
 
 #SBATCH --mail-user=niting@email.sc.edu
 #SBATCH --mail-type=ALL
@@ -24,8 +24,8 @@ dataset_dir="data/blocks_${num_blocks}-${encoding}"
 
 # Generate timestamp and build unique dirs/paths
 timestamp=$(date +%Y%m%d_%H%M%S)
-output_base_dir="./training_outputs_${encoding}/${model_type}_${timestamp}"
-benchmark_output_dir="./benchmark_results_${encoding}/${model_type}_${timestamp}"
+output_base_dir="./training_outputs/training_outputs_${encoding}/${model_type}_${timestamp}"
+benchmark_output_dir="./benchmark_results/benchmark_results_${encoding}/${model_type}_${timestamp}"
 llama_model_id="meta-llama/Llama-3.1-8B-Instruct"
 
 mkdir -p "${output_base_dir}"

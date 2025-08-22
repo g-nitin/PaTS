@@ -25,8 +25,8 @@ dataset_dir="data/blocks_${num_blocks}-${encoding}"
 # Generate timestamp and build unique dirs/paths
 timestamp='20250716_152958'
 
-output_dir="./training_outputs_${encoding}/${model_type}_${timestamp}"
-benchmark_output_dir="./benchmark_results_${encoding}/${model_type}_${timestamp}"
+output_dir="./training_outputs/training_outputs_${encoding}/${model_type}_${timestamp}"
+benchmark_output_dir="./benchmark_results/benchmark_results_${encoding}/${model_type}_${timestamp}"
 
 if [ "$model_type" = 'lstm' ]; then
     echo "Using LSTM model"

@@ -11,10 +11,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from torch.utils.data import DataLoader
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.trainer import Trainer
 from transformers.trainer_utils import set_seed as ttm_set_seed
+from transformers.training_args import TrainingArguments
 
 from scripts.BlocksWorldValidator import BlocksWorldValidator
+from scripts.models.llama import LlamaFinetuneDataCollator, LlamaFinetuneDataset
 from scripts.models.lstm import PaTS_LSTM, lstm_collate_fn
 from scripts.models.ttm import BlocksWorldTTM, determine_ttm_model
 from scripts.models.ttm import ModelConfig as TTMModelConfig
@@ -297,7 +302,11 @@ def main():
 
     # Common arguments
     parser.add_argument(
-        "--model_type", type=str, required=True, choices=["lstm", "ttm", "xgboost"], help="Type of model to train."
+        "--model_type",
+        type=str,
+        required=True,
+        choices=["lstm", "ttm", "xgboost", "llama_finetune"],
+        help="Type of model to train.",
     )
     parser.add_argument(
         "--dataset_dir",
@@ -377,6 +386,34 @@ def main():
         help="Number of past states to include in XGBoost input features. Default is 1 (current state only).",
     )
 
+    # Llama fine-tuning specific arguments
+    parser.add_argument(
+        "--llama_model_id",
+        type=str,
+        default="meta-llama/Llama-3.1-8B-Instruct",
+        help="Base Llama model ID for fine-tuning.",
+    )
+    parser.add_argument("--lora_r", type=int, default=16, help="LoRA attention dimension.")
+    parser.add_argument("--lora_alpha", type=int, default=32, help="Alpha parameter for LoRA scaling.")
+    parser.add_argument("--lora_dropout", type=float, default=0.05, help="Dropout probability for LoRA layers.")
+    parser.add_argument(
+        "--lora_target_modules",
+        type=str,
+        default="q_proj,v_proj,k_proj,o_proj,gate_proj,up_proj,down_proj",
+        help="Comma-separated list of module names to apply LoRA to.",
+    )
+    parser.add_argument("--llama_max_seq_len", type=int, default=512, help="Maximum sequence length for Llama fine-tuning.")
+    parser.add_argument(
+        "--gradient_accumulation_steps", type=int, default=1, help="Number of updates steps to accumulate gradients for."
+    )
+    parser.add_argument(
+        "--warmup_ratio", type=float, default=0.03, help="Ratio of total training steps for a linear warmup."
+    )
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay for optimizer.")
+    parser.add_argument("--logging_steps", type=int, default=10, help="Log every N steps.")
+    parser.add_argument("--save_steps", type=int, default=100, help="Save checkpoint every N steps.")
+    parser.add_argument("--eval_steps", type=int, default=100, help="Run evaluation every N steps.")
+
     args = parser.parse_args()
 
     print("Parsed Arguments:")
@@ -424,7 +461,7 @@ def main():
             validator = BlocksWorldValidator(args.num_blocks, args.encoding_type)
             print("Validator for SAS encoding initialized.")
 
-    # Load Datasets
+    # Load Datasets (PaTSDataset is generic)
     print("Loading datasets...")
     try:
         train_dataset = PaTSDataset(
@@ -558,6 +595,111 @@ def main():
         print(f"Saving TTM model assets to {final_model_assets_path}")
         ttm_trainer_instance.save(final_model_assets_path)
         print("TTM Training finished.")
+
+    elif args.model_type == "llama_finetune":
+        print("Starting Llama fine-tuning setup...")
+
+        # Load base model and tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(args.llama_model_id)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "left"  # Llama-3-Instruct prefers left padding for generation
+
+        model = AutoModelForCausalLM.from_pretrained(
+            args.llama_model_id,
+            torch_dtype=torch.bfloat16,  # As requested, no quantization
+            device_map="auto",
+        )
+
+        # Prepare model for LoRA training (e.g., gradient checkpointing, fp32 for layer norm)
+        # Even without kbit, this helps with memory and stability
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+
+        # LoRA configuration
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            bias="none",  # Common for LoRA
+            task_type="CAUSAL_LM",
+            target_modules=args.lora_target_modules.split(","),  # Split comma-separated string
+        )
+
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+
+        # Prepare datasets for Llama fine-tuning
+        train_llama_dataset = LlamaFinetuneDataset(
+            pats_dataset=train_dataset,
+            tokenizer=tokenizer,
+            encoding_type=args.encoding_type,
+            num_blocks=args.num_blocks,
+            max_seq_len=args.llama_max_seq_len,
+        )
+        val_llama_dataset = (
+            LlamaFinetuneDataset(
+                pats_dataset=val_dataset,
+                tokenizer=tokenizer,
+                encoding_type=args.encoding_type,
+                num_blocks=args.num_blocks,
+                max_seq_len=args.llama_max_seq_len,
+            )
+            if len(val_dataset) > 0
+            else None
+        )
+
+        data_collator = LlamaFinetuneDataCollator(tokenizer, max_seq_len=args.llama_max_seq_len)
+
+        # Training arguments for HuggingFace Trainer
+        training_args = TrainingArguments(
+            output_dir=model_specific_output_dir / "lora_checkpoints",  # Checkpoints will be saved here
+            num_train_epochs=args.epochs,
+            per_device_train_batch_size=args.batch_size,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            optim="paged_adamw_8bit"
+            if torch.cuda.is_available()
+            else "adamw_torch",  # Use paged_adamw_8bit if available, else adamw_torch
+            learning_rate=args.learning_rate,
+            fp16=False,  # We are using bfloat16, not fp16
+            bf16=True,  # Enable bfloat16
+            max_grad_norm=0.3,  # Common for LLMs
+            warmup_ratio=args.warmup_ratio,
+            lr_scheduler_type="cosine",
+            logging_steps=args.logging_steps,
+            save_strategy="steps",
+            save_steps=args.save_steps,
+            eval_strategy="steps" if val_llama_dataset else "no",
+            eval_steps=args.eval_steps if val_llama_dataset else None,
+            report_to="tensorboard",
+            load_best_model_at_end=True if val_llama_dataset else False,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,
+            seed=args.seed,
+            ddp_find_unused_parameters=False,  # Important for LoRA
+            remove_unused_columns=False,  # Keep all columns for custom collator
+            weight_decay=args.weight_decay,
+        )
+
+        # Initialize Trainer
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            train_dataset=train_llama_dataset,
+            eval_dataset=val_llama_dataset,
+            data_collator=data_collator,
+        )
+
+        # Start training
+        print("Starting Llama LoRA fine-tuning...")
+        trainer.train()
+        print("Llama LoRA fine-tuning finished.")
+
+        # Save the fine-tuned adapter
+        lora_adapter_output_path = model_specific_output_dir / "lora_adapter"
+        lora_adapter_output_path.mkdir(parents=True, exist_ok=True)
+        trainer.model.save_pretrained(lora_adapter_output_path)
+        tokenizer.save_pretrained(lora_adapter_output_path)  # Save tokenizer with adapter
+        print(f"LoRA adapter saved to {lora_adapter_output_path}")
 
     elif args.model_type == "xgboost":
         print("Starting XGBoost training setup...")

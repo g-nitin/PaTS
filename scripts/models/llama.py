@@ -4,6 +4,8 @@ from typing import List, Optional
 
 import numpy as np
 import torch
+from peft import PeftModel
+from torch.utils.data import Dataset as TorchDataset  # Alias to avoid conflict with PaTSDataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..pats_dataset import PaTSDataset
@@ -39,7 +41,6 @@ def get_llama_model_and_tokenizer(model_id: str, device: torch.device):
 
         _llama_model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            # quantization_config=bnb_config, # REMOVE THIS LINE
             torch_dtype=torch.bfloat16,  # Keep this for bfloat16 precision
             device_map="auto",  # Keep this for automatic device mapping
         )
@@ -88,8 +89,30 @@ class LlamaWrapper(PlannableModel):
     def load_model(self):
         """
         Loads the Llama model and tokenizer, and prepares the one-shot example.
+        Handles loading a LoRA adapter if model_path points to one.
         """
-        self.model, self.tokenizer = get_llama_model_and_tokenizer(self.model_id, self.device)
+        # Check if model_path is a directory and contains a LoRA adapter
+        # This means we are loading a fine-tuned model for inference
+        if self.model_path.is_dir() and (self.model_path / "adapter_model.safetensors").exists():
+            print(f"Loading base Llama model '{self.model_id}' and then LoRA adapter from '{self.model_path}'")
+            # Load tokenizer from adapter path first, as it might be updated
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer.padding_side = "left"
+
+            # Load base model (without caching, as it might be different from _llama_model if multiple Llama models are used)
+            base_model = AutoModelForCausalLM.from_pretrained(
+                self.model_id,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+            )
+            self.model = PeftModel.from_pretrained(base_model, self.model_path)
+            self.model.eval()  # Set to evaluation mode
+            print(f"LoRA adapter loaded from {self.model_path}")
+        else:
+            # Original logic for loading base model (zero-shot/few-shot inference)
+            self.model, self.tokenizer = get_llama_model_and_tokenizer(self.model_id, self.device)
 
         # Infer state dimension from dataset regardless of few-shot/zero-shot
         try:
@@ -330,3 +353,107 @@ NEXT_STATE: [/INST]"""
         if self.state_vec_dim == -1:
             raise RuntimeError("State dimension not inferred. Call load_model() first.")
         return self.state_vec_dim
+
+
+class LlamaFinetuneDataset(TorchDataset):  # Use TorchDataset alias
+    def __init__(self, pats_dataset: PaTSDataset, tokenizer, encoding_type: str, num_blocks: int, max_seq_len: int = 512):
+        self.pats_dataset = pats_dataset
+        self.tokenizer = tokenizer
+        self.encoding_type = encoding_type
+        self.num_blocks = num_blocks
+        self.max_seq_len = max_seq_len
+        self.processed_samples = []
+
+        self._process_data()
+
+    def _vector_to_string(self, vec: np.ndarray) -> str:
+        # Helper function, identical to LlamaWrapper's
+        return "[" + " ".join(map(str, vec.astype(int).tolist())) + "]"
+
+    def _process_data(self):
+        instruction = 'You are an expert planning AI. Your task is to generate a sequence of states to solve a planning problem in Blocksworld. You operate on numerical state representations. Given an initial state and a goal state, predict ONLY the next state in the plan, in the exact format "[num1 num2 ... numF]". Do not output any other text or explanation.'
+
+        for i in range(len(self.pats_dataset)):
+            item = self.pats_dataset[i]
+            expert_trajectory = item["expert_trajectory"]  # (L, F)
+            goal_state = item["goal_state"]  # (F,)
+
+            goal_state_str = self._vector_to_string(goal_state)
+
+            # Generate (S_t, S_G) -> S_{t+1} pairs
+            for t in range(len(expert_trajectory) - 1):
+                current_state_str = self._vector_to_string(expert_trajectory[t])
+                next_state_str = self._vector_to_string(expert_trajectory[t + 1])
+
+                prompt = f"""<s>[INST] {instruction}
+Now, generate for the following:
+INITIAL_STATE: {current_state_str}
+GOAL_STATE: {goal_state_str}
+NEXT_STATE: [/INST]"""
+                completion = f"{next_state_str}</s>"
+
+                self.processed_samples.append({"prompt": prompt, "completion": completion})
+
+    def __len__(self):
+        return len(self.processed_samples)
+
+    def __getitem__(self, idx):
+        return self.processed_samples[idx]
+
+
+class LlamaFinetuneDataCollator:
+    def __init__(self, tokenizer, max_seq_len: int = 512):
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+
+    def __call__(self, batch):
+        input_ids_list = []
+        labels_list = []
+
+        for item in batch:
+            prompt = item["prompt"]
+            completion = item["completion"]
+
+            # Tokenize prompt and completion
+            # add_special_tokens=False because we manually add <s> and </s>
+            prompt_tokens = self.tokenizer(prompt, add_special_tokens=False, return_attention_mask=False)
+            completion_tokens = self.tokenizer(completion, add_special_tokens=False, return_attention_mask=False)
+
+            # Combine them
+            full_input_ids = prompt_tokens["input_ids"] + completion_tokens["input_ids"]
+            # Labels should be -100 for prompt tokens, and actual token IDs for completion tokens
+            labels = [-100] * len(prompt_tokens["input_ids"]) + full_input_ids[len(prompt_tokens["input_ids"]) :]
+
+            # Truncate if necessary
+            if len(full_input_ids) > self.max_seq_len:
+                full_input_ids = full_input_ids[: self.max_seq_len]
+                labels = labels[: self.max_seq_len]
+
+            input_ids_list.append(full_input_ids)
+            labels_list.append(labels)
+
+        # Pad to max length in batch
+        # Use tokenizer.pad for consistent padding
+        padded_input_ids = self.tokenizer.pad(
+            {"input_ids": input_ids_list},
+            padding="longest",
+            max_length=self.max_seq_len,
+            return_tensors="pt",
+        )["input_ids"]
+
+        padded_labels = self.tokenizer.pad(
+            {"input_ids": labels_list},
+            padding="longest",
+            max_length=self.max_seq_len,
+            return_tensors="pt",
+        )["input_ids"]
+        # Ensure padding for labels is -100
+        padded_labels[padded_labels == self.tokenizer.pad_token_id] = -100
+
+        attention_mask = (padded_input_ids != self.tokenizer.pad_token_id).long()
+
+        return {
+            "input_ids": padded_input_ids,
+            "labels": padded_labels,
+            "attention_mask": attention_mask,
+        }

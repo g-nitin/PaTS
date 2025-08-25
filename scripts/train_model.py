@@ -305,7 +305,7 @@ def main():
         "--model_type",
         type=str,
         required=True,
-        choices=["lstm", "ttm", "xgboost", "llama_finetune"],
+        choices=["lstm", "ttm", "xgboost", "llama", "llama_finetune"],
         help="Type of model to train.",
     )
     parser.add_argument(
@@ -413,6 +413,11 @@ def main():
     parser.add_argument("--logging_steps", type=int, default=10, help="Log every N steps.")
     parser.add_argument("--save_steps", type=int, default=100, help="Save checkpoint every N steps.")
     parser.add_argument("--eval_steps", type=int, default=100, help="Run evaluation every N steps.")
+    parser.add_argument(
+        "--llama_use_few_shot",
+        action="store_true",
+        help="For Llama models, include a one-shot example in the prompt for few-shot inference.",
+    )
 
     args = parser.parse_args()
 

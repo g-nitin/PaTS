@@ -134,8 +134,7 @@ elif [ "$model_type" = 'xgboost' ]; then
 
 elif [ "$model_type" = 'llama' ]; then   # This block is for base Llama (zero-shot/few-shot)
     echo "Using Llama model (base, no fine-tuning)"
-    # For Llama, model_path will be the model_id directly, as it's not a local file path
-    model_path="$llama_model_id"
+    model_path="$llama_model_id" # For Llama, model_path is the model_id directly
 
     # 1. Benchmark Zero-shot Llama 
     echo "\n"
@@ -153,7 +152,7 @@ elif [ "$model_type" = 'llama' ]; then   # This block is for base Llama (zero-sh
         --max_plan_length 60 \
         --save_detailed_results \
         --xgboost_context_window_size 3 # Llama will ignore this
-        # --llama_use_few_shot is NOT present for zero-shot
+        --llama_model_id "$llama_model_id"
 
     echo "Zero-shot Llama benchmarking completed. Results in $zero_shot_benchmark_output_dir"
 
@@ -173,7 +172,8 @@ elif [ "$model_type" = 'llama' ]; then   # This block is for base Llama (zero-sh
         --max_plan_length 60 \
         --save_detailed_results \
         --xgboost_context_window_size 3 \
-        --llama_use_few_shot # ADD THIS FLAG FOR FEW-SHOT
+        --llama_use_few_shot \
+        --llama_model_id "$llama_model_id"
 
     echo "Few-shot Llama benchmarking completed. Results in $few_shot_benchmark_output_dir"
 

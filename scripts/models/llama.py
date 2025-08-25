@@ -57,24 +57,28 @@ class LlamaWrapper(PlannableModel):
 
     def __init__(
         self,
-        model_id: str,
+        model_id: str,  # This can be base model_id or adapter path
         num_blocks: int,
         device: torch.device,
         encoding_type: str,
         dataset_dir: Path,
         use_few_shot_example: bool = True,
+        base_model_id: Optional[str] = None,  # When loading adapter
     ):
         """
         Initializes the LlamaWrapper.
 
-        :param model_id: HuggingFace model ID (e.g., "meta-llama/Llama-3.1-8B-Instruct").
+        :param model_id: HuggingFace model ID (e.g., "meta-llama/Llama-3.1-8B-Instruct") or path to LoRA adapter.
         :param num_blocks: Number of blocks in the Blocksworld domain.
         :param device: The Torch device to run the model on.
         :param encoding_type: The state encoding type ('bin' or 'sas').
         :param dataset_dir: Path to the dataset directory to load a one-shot example.
+        :param use_few_shot_example: Whether to include a few-shot example in the prompt.
+        :param base_model_id: The original HuggingFace model ID if `model_id` is a path to a LoRA adapter.
         """
         super().__init__(Path(model_id), num_blocks, device)  # model_path for PlannableModel is now model_id
         self.model_id = model_id
+        self.base_model_id = base_model_id if base_model_id else model_id  # Store the actual base model ID
         self.encoding_type = encoding_type
         self.state_vec_dim: int = -1  # Will be inferred from dataset
         self.example_initial_state: Optional[np.ndarray] = None
@@ -94,7 +98,7 @@ class LlamaWrapper(PlannableModel):
         # Check if model_path is a directory and contains a LoRA adapter
         # This means we are loading a fine-tuned model for inference
         if self.model_path.is_dir() and (self.model_path / "adapter_model.safetensors").exists():
-            print(f"Loading base Llama model '{self.model_id}' and then LoRA adapter from '{self.model_path}'")
+            print(f"Loading base Llama model '{self.base_model_id}' and then LoRA adapter from '{self.model_path}'")
             # Load tokenizer from adapter path first, as it might be updated
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_path)
             if self.tokenizer.pad_token is None:
@@ -103,7 +107,7 @@ class LlamaWrapper(PlannableModel):
 
             # Load base model (without caching, as it might be different from _llama_model if multiple Llama models are used)
             base_model = AutoModelForCausalLM.from_pretrained(
-                self.model_id,
+                self.base_model_id,
                 torch_dtype=torch.bfloat16,
                 device_map="auto",
             )
@@ -111,8 +115,8 @@ class LlamaWrapper(PlannableModel):
             self.model.eval()  # Set to evaluation mode
             print(f"LoRA adapter loaded from {self.model_path}")
         else:
-            # Original logic for loading base model (zero-shot/few-shot inference)
-            self.model, self.tokenizer = get_llama_model_and_tokenizer(self.model_id, self.device)
+            # Logic for loading base model (zero-shot/few-shot inference)
+            self.model, self.tokenizer = get_llama_model_and_tokenizer(self.base_model_id, self.device)
 
         # Infer state dimension from dataset regardless of few-shot/zero-shot
         try:

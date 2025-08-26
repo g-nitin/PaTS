@@ -349,8 +349,7 @@ def compute_timeseries_metrics(
             num_features = predicted_plan_np.shape[1]
 
             # Define a lambda to wrap the hamming distance and scale it
-            def hamming_dist_raw(u, v):
-                return hamming(u, v) * num_features
+            hamming_dist_raw = lambda u, v: hamming(u, v) * num_features
 
             # The fastdtw function is the robust way to do this.
             dtw_dist, path = fastdtw(predicted_plan_np, expert_plan, dist=hamming_dist_raw)
@@ -390,7 +389,6 @@ def get_plannable_model(
     context_window_size: int,
     dataset_dir: Path,
     llama_use_few_shot: bool = True,
-    llama_model_id: str = "meta-llama/Llama-3.1-8B-Instruct",
 ) -> PlannableModel:
     """Factory function to get a PlannableModel instance."""
     model_type_lower = model_type.lower()
@@ -401,16 +399,10 @@ def get_plannable_model(
     elif model_type_lower == "xgboost":
         return XGBoostWrapper(model_path, num_blocks, device, encoding_type, seed, context_window_size)
     elif model_type_lower == "llama":
-        # For Llama, model_path is the model_id string or adapter path.
+        # For Llama, model_path is the model_id string.
         # dataset_dir is needed by LlamaWrapper to fetch a one-shot example.
         return LlamaWrapper(
-            str(model_path),
-            num_blocks,
-            device,
-            encoding_type,
-            dataset_dir,
-            use_few_shot_example=llama_use_few_shot,
-            base_model_id=llama_model_id,
+            str(model_path), num_blocks, device, encoding_type, dataset_dir, use_few_shot_example=llama_use_few_shot
         )
     # elif model_type_lower == "plansformer":
     #     # return PlansformerWrapper(model_path, num_blocks, device) # Placeholder
@@ -763,12 +755,6 @@ if __name__ == "__main__":
         "--llama_use_few_shot",
         action="store_true",
         help="For Llama models, include a one-shot example in the prompt for few-shot inference.",
-    )
-    parser.add_argument(
-        "--llama_model_id",
-        type=str,
-        default="meta-llama/Llama-3.1-8B-Instruct",
-        help="Base Llama model ID. Used by LlamaWrapper to load the base model when --model_path is a LoRA adapter.",
     )
 
     cli_args = parser.parse_args()

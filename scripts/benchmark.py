@@ -349,7 +349,8 @@ def compute_timeseries_metrics(
             num_features = predicted_plan_np.shape[1]
 
             # Define a lambda to wrap the hamming distance and scale it
-            hamming_dist_raw = lambda u, v: hamming(u, v) * num_features
+            def hamming_dist_raw(u, v):
+                return hamming(u, v) * num_features
 
             # The fastdtw function is the robust way to do this.
             dtw_dist, path = fastdtw(predicted_plan_np, expert_plan, dist=hamming_dist_raw)
@@ -403,7 +404,11 @@ def get_plannable_model(
         # For Llama, model_path is the model_id string or adapter path.
         # dataset_dir is needed by LlamaWrapper to fetch a one-shot example.
         return LlamaWrapper(
-            str(model_path), num_blocks, device, encoding_type, dataset_dir,
+            str(model_path),
+            num_blocks,
+            device,
+            encoding_type,
+            dataset_dir,
             use_few_shot_example=llama_use_few_shot,
             base_model_id=llama_model_id,
         )

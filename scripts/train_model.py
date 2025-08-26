@@ -17,6 +17,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.trainer import Trainer
 from transformers.trainer_utils import set_seed as ttm_set_seed
 from transformers.training_args import TrainingArguments
+from transformers.utils.quantization_config import BitsAndBytesConfig
 
 from scripts.BlocksWorldValidator import BlocksWorldValidator
 from scripts.models.llama import LlamaFinetuneDataCollator, LlamaFinetuneDataset
@@ -274,7 +275,6 @@ def prepare_data_for_xgboost(dataset: PaTSDataset, context_window_size: int) -> 
 
         # Create (S_{t-k+1}, ..., S_t, S_G) -> S_{t+1} pairs
         for t in range(len(trajectory) - 1):  # Iterate from S_0 to S_{L-2} to predict S_1 to S_{L-1}
-            current_state = trajectory[t]
             next_state = trajectory[t + 1]
 
             # Build the context window for S_t
@@ -610,9 +610,18 @@ def main():
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "left"  # Llama-3-Instruct prefers left padding for generation
 
+        # 4-bit quantization for memory efficiency on 16GB GPUs
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+
         model = AutoModelForCausalLM.from_pretrained(
             args.llama_model_id,
-            torch_dtype=torch.bfloat16,  # As requested, no quantization
+            quantization_config=bnb_config,  # Use quantization
+            torch_dtype=torch.bfloat16,  # bfloat16 for compute
             device_map="auto",
         )
 
@@ -661,13 +670,11 @@ def main():
             num_train_epochs=args.epochs,
             per_device_train_batch_size=args.batch_size,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
-            optim="paged_adamw_8bit"
-            if torch.cuda.is_available()
-            else "adamw_torch",  # Use paged_adamw_8bit if available, else adamw_torch
+            optim="paged_adamw_8bit",  # Use paged_adamw_8bit for 4-bit quantized models
             learning_rate=args.learning_rate,
-            fp16=False,  # We are using bfloat16, not fp16
-            bf16=True,  # Enable bfloat16
-            max_grad_norm=0.3,  # Common for LLMs
+            fp16=False,
+            bf16=True,
+            max_grad_norm=0.3,
             warmup_ratio=args.warmup_ratio,
             lr_scheduler_type="cosine",
             logging_steps=args.logging_steps,
@@ -680,8 +687,8 @@ def main():
             metric_for_best_model="eval_loss",
             greater_is_better=False,
             seed=args.seed,
-            ddp_find_unused_parameters=False,  # Important for LoRA
-            remove_unused_columns=False,  # Keep all columns for custom collator
+            ddp_find_unused_parameters=False,
+            remove_unused_columns=False,
             weight_decay=args.weight_decay,
         )
 
@@ -702,8 +709,8 @@ def main():
         # Save the fine-tuned adapter
         lora_adapter_output_path = model_specific_output_dir / "lora_adapter"
         lora_adapter_output_path.mkdir(parents=True, exist_ok=True)
-        trainer.model.save_pretrained(lora_adapter_output_path)
-        tokenizer.save_pretrained(lora_adapter_output_path)  # Save tokenizer with adapter
+        trainer.model.save_pretrained(lora_adapter_output_path)  # type: ignore
+        tokenizer.save_pretrained(lora_adapter_output_path)
         print(f"LoRA adapter saved to {lora_adapter_output_path}")
 
     elif args.model_type == "xgboost":

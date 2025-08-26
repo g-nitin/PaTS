@@ -1,6 +1,7 @@
 [project]
 dependencies = [
   "accelerate>=1.10.0",
+  "bitsandbytes>=0.47.0 ; sys_platform == 'linux'",
   "fastdtw>=0.3.4",
   "hf-xet>=1.1.2",
   "loguru>=0.7.3",

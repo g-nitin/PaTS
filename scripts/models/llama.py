@@ -7,6 +7,7 @@ import torch
 from peft import PeftModel
 from torch.utils.data import Dataset as TorchDataset  # Alias to avoid conflict with PaTSDataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.utils.quantization_config import BitsAndBytesConfig
 
 from ..pats_dataset import PaTSDataset
 
@@ -22,10 +23,10 @@ _llama_model = None
 _llama_tokenizer = None
 
 
-def get_llama_model_and_tokenizer(model_id: str, device: torch.device):
+def get_llama_model_and_tokenizer(model_id: str):
     """
     Loads and caches the Llama model and tokenizer.
-    Uses 4-bit quantization if CUDA is available.
+    Uses 4-bit quantization for memory efficiency.
     """
     global _llama_model, _llama_tokenizer
     if _llama_model is None or _llama_tokenizer is None:
@@ -36,16 +37,24 @@ def get_llama_model_and_tokenizer(model_id: str, device: torch.device):
         if _llama_tokenizer.pad_token is None:
             # Llama models usually have EOS as pad token if not explicitly set
             _llama_tokenizer.pad_token = _llama_tokenizer.eos_token
-        # Set padding side for generation (important for autoregressive models)
-        _llama_tokenizer.padding_side = "left"  # Llama-3-Instruct prefers left padding for generation
+        _llama_tokenizer.padding_side = "left"
+
+        # 4-bit quantization for memory efficiency on 16GB GPUs
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,  # Double quantization can further save memory
+        )
 
         _llama_model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.bfloat16,  # Keep this for bfloat16 precision
-            device_map="auto",  # Keep this for automatic device mapping
+            quantization_config=bnb_config,  # Use quantization
+            torch_dtype=torch.bfloat16,  # bfloat16 for compute
+            device_map="auto",
         )
-        _llama_model.eval()  # Set to evaluation mode
-        print("Llama model loaded.")
+        _llama_model.eval()
+        print("Llama model loaded with 4-bit quantization.")
     return _llama_model, _llama_tokenizer
 
 
@@ -105,18 +114,28 @@ class LlamaWrapper(PlannableModel):
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.padding_side = "left"
 
-            # Load base model (without caching, as it might be different from _llama_model if multiple Llama models are used)
+            # 4-bit quantization for memory efficiency
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+            )
+
+            # Load base model with quantization
             base_model = AutoModelForCausalLM.from_pretrained(
                 self.base_model_id,
+                quantization_config=bnb_config,
                 torch_dtype=torch.bfloat16,
                 device_map="auto",
             )
             self.model = PeftModel.from_pretrained(base_model, self.model_path)
-            self.model.eval()  # Set to evaluation mode
-            print(f"LoRA adapter loaded from {self.model_path}")
+            self.model.eval()
+            print(f"LoRA adapter loaded from {self.model_path} with 4-bit quantization.")
         else:
-            # Logic for loading base model (zero-shot/few-shot inference)
-            self.model, self.tokenizer = get_llama_model_and_tokenizer(self.base_model_id, self.device)
+            # Loading base model (zero-shot/few-shot inference)
+            # This will use the get_llama_model_and_tokenizer which also uses 4-bit quantization now.
+            self.model, self.tokenizer = get_llama_model_and_tokenizer(self.base_model_id)
 
         # Infer state dimension from dataset regardless of few-shot/zero-shot
         try:
@@ -138,17 +157,17 @@ class LlamaWrapper(PlannableModel):
         # Load one-shot example ONLY if use_few_shot_example is True
         if self.use_few_shot_example:
             try:
-                if len(temp_dataset) > 0:
+                if len(temp_dataset) > 0:  # type: ignore
                     # Load one example for one-shot inference from the training set.
                     # It's crucial that this example has at least 2 states (S0, S1) for the prompt.
-                    for i in range(len(temp_dataset)):
-                        example_item = temp_dataset[i]
+                    for i in range(len(temp_dataset)):  # type: ignore
+                        example_item = temp_dataset[i]  # type: ignore
                         if example_item["expert_trajectory"].shape[0] >= 2:
                             self.example_initial_state = example_item["expert_trajectory"][0]
                             self.example_goal_state = example_item["goal_state"]
                             self.example_plan_trajectory = example_item["expert_trajectory"]
                             print(
-                                f"Loaded one-shot example from {example_item['id']} (trajectory length: {self.example_plan_trajectory.shape[0]})"
+                                f"Loaded one-shot example from {example_item['id']} (trajectory length: {self.example_plan_trajectory.shape[0]})"  # type: ignore
                             )
                             break
                     if self.example_plan_trajectory is None:
@@ -288,7 +307,7 @@ INITIAL_STATE: {current_state_str}
 GOAL_STATE: {goal_state_str}
 NEXT_STATE: [/INST]"""
 
-        generated_plan_list_of_lists: List[List[int]] = [initial_state_np.tolist()]
+        generated_plan_list_of_lists: List[List[int]] = [initial_state_np.tolist()]  # type: ignore
 
         for step in range(max_length - 1):  # max_length includes S0, so iterate for max_length-1 steps
             inputs = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True).to(self.device)
@@ -326,7 +345,7 @@ NEXT_STATE: [/INST]"""
 
             # Convert to list for the plan storage
             next_state_list = next_state_np.tolist()
-            generated_plan_list_of_lists.append(next_state_list)
+            generated_plan_list_of_lists.append(next_state_list)  # type: ignore
 
             # Update current state string for the next iteration's prompt
             current_state_str = self._vector_to_string(next_state_np)

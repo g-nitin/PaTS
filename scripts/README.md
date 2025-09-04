@@ -4,115 +4,70 @@ The typical workflow for using PaTS is:
 
 1.  **Dataset Generation**:
 
-    - Configure `data/generate_dataset.sh` (paths, number of blocks, problems per config).
-    - Run the script: `cd data && ./generate_dataset.sh`.
-    - This will populate `data/blocks_<N>/` directories with PDDL files, plans, VAL logs, encoded trajectories, and the predicate manifest.
+    - Configure and run `data/generate_dataset.sh` for the desired number of blocks and encoding type (`bin` or `sas`).
+    - This populates a directory like `data/blocks_4-sas/` with all necessary files.
 
 2.  **Model Training**:
 
     - Use the unified training script `scripts/train_model.py`.
-    - Specify the `model_type` (e.g., `ttm`, `lstm`) and other relevant parameters.
-    - Example:
-
+    - Specify the `model_type` (`lstm`, `ttm`, `xgboost`), `encoding_type`, and other parameters.
+    - Example (`lstm`, `sas`):
       ```bash
-      # For TTM
-      uv run python -m scripts.train_model \
-          --model_type ttm \
-          --dataset_dir data/blocks_4 \
-          --dataset_split_dir data/blocks_4 \
-          --num_blocks 4 \
-          --output_dir ./training_outputs \
-          --epochs 100
-
-      # For LSTM
       uv run python -m scripts.train_model \
           --model_type lstm \
-          --dataset_dir data/blocks_4 \
-          --dataset_split_dir data/blocks_4 \
+          --dataset_dir data/blocks_4-sas \
           --num_blocks 4 \
-          --encoding_type bin \ # Specify 'bin' or 'sas'
-          --output_dir ./training_outputs \
-          --epochs 200
+          --encoding_type sas \
+          --output_dir ./training_outputs
       ```
-
-    - The script loads data based on `train_files.txt` and `val_files.txt`, trains the specified model, and saves weights/configuration to a subdirectory within `--output_dir` (e.g., `./training_outputs/ttm_N4/`).
+    - The script saves model artifacts to a subdirectory within `--output_dir`.
 
 3.  **Model Evaluation (Benchmarking)**:
-    - Use the `scripts/benchmark.py` script for comprehensive evaluation.
-    - This script requires the path to the dataset, the number of blocks, model type, path to the trained model, and an output directory.
-    - Example:
+    - Use `scripts/benchmark.py` for comprehensive evaluation on the test set.
+    - This script works for all models, including inference-only models like Llama.
+    - Example (evaluating a trained `lstm`):
       ```bash
-      uv run python -m scripts.benchmark.py \
-          --dataset_dir data/blocks_4 \
+      uv run python -m scripts.benchmark \
+          --dataset_dir data/blocks_4-sas \
           --num_blocks 4 \
-          --model_type ttm \ # or lstm
-          --model_path ./training_outputs/ttm_N4/final_model_assets \ # Adjust path based on actual saved model
+          --model_type lstm \
+          --model_path ./training_outputs/lstm_N4/pats_lstm_model_N4.pth \
+          --encoding_type sas \
+          --output_dir ./benchmark_results
       ```
-
--          --encoding_type bin \ # Must match the model's training encoding
-          --output_dir ./benchmark_results_ttm_N4
+    - Example (evaluating `llama` in a few-shot setting):
+      ```bash
+      uv run python -m scripts.benchmark \
+          --dataset_dir data/blocks_4-sas \
+          --num_blocks 4 \
+          --model_type llama \
+          --model_path "meta-llama/Llama-3.1-8B-Instruct" \
+          --encoding_type sas \
+          --output_dir ./benchmark_results \
+          --llama_use_few_shot
       ```
-  - The script loads test problems specified in `data/blocks_<N>/test_files.txt`, uses the appropriate model wrapper to generate plans, validates them using `BlocksWorldValidator` (which uses the predicate manifest), and computes a range of metrics.
 
 ## Key Scripts and Components
 
-- **`data/generate_dataset.sh`**: Automates the entire data generation pipeline from PDDL problem generation to encoded trajectories and predicate manifests.
-- **`data/parse_and_encode.py`**: Parses PDDL files (for initial/goal states) and VAL output logs (for state transitions), reconstructs state trajectories, encodes them into binary vectors based on a generated predicate order, and saves the binary data along with the crucial `predicate_manifest_<N>.txt` file.
-- **`data/analyze_dataset_splits.py`**: Analyzes the generated dataset for distributions and splits it into training, validation, and test sets, creating `*_files.txt`.
-- **`scripts/train_model.py`**: The **central script for training PaTS models (LSTM, TTM, etc.)**. It handles dataset loading, model instantiation, and invoking model-specific training loops. It can optionally add a constraint violation loss term during training (for LSTM) by using the `--use_constraint_loss` flag. This leverages the `BlocksWorldValidator` to guide the model towards generating physically valid states.
-- **`scripts/pats_dataset.py`**: Contains the `PaTSDataset` class, a unified PyTorch Dataset for loading pre-encoded binary trajectories and goal states from `.npy` files based on split file lists (e.g., `train_files.txt`).
-- **`scripts/BlocksWorldValidator.py`**:
-  - Contains the `BlocksWorldValidator` class responsible for checking the physical validity of individual states and the legality of transitions between states in the Blocks World domain.
-  - **Crucially, it is initialized with `num_blocks` and an `encoding_type` ('bin' or 'sas').** For binary encoding, it also requires the path to the `predicate_manifest_<N>.txt` file. This allows it to dynamically apply the correct validation rules for the given state representation.
-  - Provides a differentiable `calculate_constraint_violation_loss` method that can be used during training to penalize the model for generating physically invalid states, directly embedding domain rules into the learning process.
-  - It defines `Violation` and `ValidationResult` dataclasses to structure validation output.
-- **`scripts/benchmark.py`**:
-  - The **central script for evaluating trained PaTS models.**
-  - It uses an abstract `PlannableModel` class and specific wrappers (e.g., `TTMWrapper`, `LSTMWrapper`) to interact with different models in a standardized way.
-  - Loads test data (initial states, goal states, expert trajectories) based on `test_files.txt`.
-  - For each test problem, it instructs the loaded model to generate a plan.
-  - Passes the generated plan and goal state to an instance of `BlocksWorldValidator` (configured with the correct encoding type) for validation.
-  - Collects detailed `ValidationResult` objects for each problem.
-  - Computes and outputs aggregated performance metrics.
-- **`scripts/models/ttm.py`**: Contains the `BlocksWorldTTM` class (managing TTM training and prediction), `TTMDataCollator`, and related utilities. Training is orchestrated by `scripts/train_model.py`.
-- **`scripts/models/lstm.py`**: Contains the `PaTS_LSTM` model definition (an `nn.Module`) and the `lstm_collate_fn`. Training is orchestrated by `scripts/train_model.py`.
-- **`scripts/models/plansformer.py`**: (Placeholder) Intended for a Transformer-based planning model.
+- **`train_model.py`**: The **central script for training** PaTS models (LSTM, TTM, XGBoost). It handles dataset loading, model instantiation, and training loops.
+- **`benchmark.py`**: The **central script for evaluating** all trained or pre-trained PaTS models. It uses a standardized `PlannableModel` interface to interact with different models, generates plans for test problems, and computes a rich set of performance metrics.
+- **`pats_dataset.py`**: A unified PyTorch `Dataset` class that loads pre-encoded trajectories and goals based on the specified encoding type.
+- **`BlocksWorldValidator.py`**: A crucial class for checking the physical validity of states and the legality of transitions. It dynamically adapts to the encoding (`bin` or `sas`) by reading the `encoding_info.json` file from the dataset directory.
+- **`PlannableModel.py`**: An abstract base class that defines the standard interface (`load_model`, `predict_sequence`) for all models, enabling the benchmark script to treat them interchangeably.
+- **`models/`**: This directory contains the specific implementations and wrappers for each model:
+  - `lstm.py`: The `PaTS_LSTM` model, which supports both binary and SAS+ (with an embedding layer) encodings.
+  - `ttm.py`: The `BlocksWorldTTM` wrapper for the TTM forecasting model.
+  - `xgboost.py`: The `XGBoostPlanner` implementation.
+  - `llama.py`: The `LlamaWrapper` for zero-shot and few-shot inference with large language models.
 
-## Benchmarking and Evaluation (`scripts/benchmark.py`)
+## Benchmarking and Evaluation Metrics
 
-The `benchmark.py` script provides a standardized and extensible way to evaluate different PaTS models.
+The `benchmark.py` script computes a wide range of metrics to provide a holistic view of a model's planning capabilities, including:
 
-### Validator
-
-The `BlocksWorldValidator` is key to assessing plan quality.
-
-- It checks for physical consistency (e.g., no block floating, a block isn't on two things at once).
-- It checks for legal transitions (e.g., only a valid Blocks World action could have occurred).
-- It uses the `predicate_manifest_<N>.txt` file to interpret the binary state vectors, ensuring it aligns with the current encoding scheme.
-
-### Model Wrappers
-
-To allow `benchmark.py` to work with various models, it uses an adapter pattern:
-
-- `PlannableModel` (Abstract Base Class): Defines the interface a model must implement (`load_model`, `predict_sequence`, `model_name`, `state_dim`).
-- `TTMWrapper`, `LSTMWrapper`: Concrete implementations for TTM and LSTM, adapting their specific loading and prediction methods to the `PlannableModel` interface. New models can be benchmarked by creating a similar wrapper.
-
-### Metrics
-
-`benchmark.py` computes a range of metrics, including:
-
-- **`num_samples`**: Total test problems evaluated.
-- **`valid_sequence_rate`**: Percentage of generated plans that are fully valid according to the `BlocksWorldValidator` (all states and transitions are valid).
-- **`goal_achievement_rate`**: Percentage of generated plans where the final state exactly matches the goal state.
-- **`solved_rate_strict`**: Percentage of problems where the generated plan is both fully valid AND achieves the exact goal state. This is a key indicator of overall planning success.
-- **`avg_predicted_plan_length`**: Average length of the generated plans.
-- **`avg_expert_plan_length`**: Average length of the expert-generated plans for the same problems.
-- **`avg_goal_jaccard_score`**: Average Jaccard index between the true predicates in the predicted final state and the goal state. Measures partial goal satisfaction.
-- **`avg_goal_f1_score`**: Average F1-score for predicate match in the final state vs. goal state.
-- **`avg_percent_physically_valid_states`**: Average percentage of states within each generated plan that are individually physically valid.
-- **`avg_percent_valid_transitions`**: Average percentage of transitions within each generated plan that are legal.
-- **`avg_plan_length_ratio_for_solved`**: For strictly solved problems, the average ratio of `predicted_plan_length / expert_plan_length`.
-- **`avg_plan_length_diff_for_solved`**: For strictly solved problems, the average difference `predicted_plan_length - expert_plan_length`.
-- **`violation_code_counts`**: A frequency count of different types of validation errors (e.g., `PHYS_BLOCK_FLOATING`, `TRANS_ILLEGAL_CHANGES`) encountered across all invalid plans.
-
-These metrics provide a multi-faceted view of the model's planning capabilities.
+- **`solved_rate_strict`**: The percentage of problems where the generated plan is fully valid _and_ achieves the exact goal state. This is the primary measure of success.
+- **`valid_sequence_rate`**: The percentage of plans that are physically and transitionally valid, regardless of goal achievement.
+- **`goal_achievement_rate`**: The percentage of plans that end in the correct goal state, regardless of validity.
+- **Plan Optimality Metrics**: Compares the length of solved plans to expert plans (`avg_plan_length_ratio_for_solved`).
+- **Partial Success Metrics**: Measures partial goal satisfaction (`avg_goal_f1_score`) and the percentage of valid states/transitions within a plan.
+- **Time-Series Metrics**: `dtw_distance` and `mean_per_step_hamming_dist` measure the similarity of the predicted trajectory to the expert trajectory.
+- **`violation_code_counts`**: A frequency count of different error types, useful for debugging and model analysis.

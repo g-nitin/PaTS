@@ -2,8 +2,11 @@
 **/*.pyc
 .vscode/
 
-data/blocks_*/
-data/*.zip
+data-old/blocks_*/
+data-old/*.zip
+
+data/processed_trajectories/
+data/raw_problems/
 
 outputs/
 own/

@@ -406,32 +406,47 @@ def main():
     if args.model_type == "lstm" and args.use_constraint_loss:
         print("Constraint loss enabled. Initializing BlocksWorldValidator...")
         if args.encoding_type == "bin":
-            manifest_path = args.dataset_dir / f"predicate_manifest_{args.num_blocks}.txt"
-            if not manifest_path.exists():
-                print(
-                    f"ERROR: Predicate manifest not found at {manifest_path}. Cannot use constraint loss for binary encoding."
-                )
-                sys.exit(1)
             try:
-                validator = BlocksWorldValidator(args.num_blocks, args.encoding_type, predicate_manifest_file=manifest_path)
+                # Validator now takes raw_data_dir to find the manifest
+                validator = BlocksWorldValidator(args.num_blocks, args.encoding_type, raw_data_dir=args.dataset_dir)
                 print("Validator for binary encoding initialized successfully.")
             except Exception as e:
+                print(
+                    f"ERROR: Predicate manifest not found at {args.dataset_dir / f'predicate_manifest_{args.num_blocks}.txt'}. Cannot use constraint loss for binary encoding."
+                )
+                print("Please ensure the manifest file exists in the raw_data_dir.")
                 print(f"ERROR: Failed to initialize validator: {e}")
                 sys.exit(1)
         elif args.encoding_type == "sas":
             # SAS validator doesn't need a manifest file.
             print("WARNING: Constraint loss for SAS encoding is not implemented and will have no effect.")
-            validator = BlocksWorldValidator(args.num_blocks, args.encoding_type)
+            validator = BlocksWorldValidator(args.num_blocks, args.encoding_type, raw_data_dir=args.dataset_dir)
             print("Validator for SAS encoding initialized.")
 
     # Load Datasets
     print("Loading datasets...")
+    # dataset_dir is now the RAW_BLOCK_DIR (e.g., data/raw_problems/blocksworld/N4)
+    # We need to construct the PROCESSED_BLOCK_ENCODING_DIR
+    processed_data_for_encoding_dir = (
+        args.dataset_dir.parent.parent
+        / "processed_trajectories"
+        / args.dataset_dir.parent.name
+        / args.dataset_dir.name
+        / args.encoding_type
+    )
+
     try:
         train_dataset = PaTSDataset(
-            dataset_dir=args.dataset_dir, split_file_name="train_files.txt", encoding_type=args.encoding_type
+            raw_data_dir=args.dataset_dir,
+            processed_data_dir=processed_data_for_encoding_dir,
+            split_file_name="train_files.txt",
+            encoding_type=args.encoding_type,
         )
         val_dataset = PaTSDataset(
-            dataset_dir=args.dataset_dir, split_file_name="val_files.txt", encoding_type=args.encoding_type
+            raw_data_dir=args.dataset_dir,
+            processed_data_dir=processed_data_for_encoding_dir,
+            split_file_name="val_files.txt",
+            encoding_type=args.encoding_type,
         )
     except Exception as e:
         print(f"Error initializing PaTSDataset: {e}")
@@ -496,8 +511,10 @@ def main():
         max_plan_len_in_train_data = 0
         if len(train_dataset.basenames) > 0:
             for basename_for_len_check in train_dataset.basenames:  # Iterate through filtered basenames
-                # Construct full path to .npy file using dataset_dir structure
-                traj_file_path_for_len = args.dataset_dir / "trajectories_bin" / f"{basename_for_len_check}.traj.bin.npy"
+                # Construct full path to .npy file using processed_data_for_encoding_dir
+                traj_file_path_for_len = (
+                    processed_data_for_encoding_dir / f"{basename_for_len_check}.traj.{args.encoding_type}.npy"
+                )
                 if traj_file_path_for_len.exists():
                     try:
                         traj_np = torch.from_numpy(np.load(traj_file_path_for_len))

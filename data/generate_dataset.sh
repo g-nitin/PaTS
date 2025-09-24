@@ -22,12 +22,21 @@ PARSER_ENCODER_SCRIPT="./data/parse_and_encode.py"
 # ANALYZE_AND_SPLIT_SCRIPT: Python script to analyze dataset and create train-test splits
 ANALYZE_AND_SPLIT_SCRIPT="./data/analyze_dataset_splits.py"
 
-# OUTPUT_DIR: Directory to store generated PDDL problems, plans, VAL outputs, and final trajectories
-OUTPUT_DIR="./data-sas"
+# GET_PROBLEM_HASH_SCRIPT: Python script to get unique hash for a problem
+GET_PROBLEM_HASH_SCRIPT="./data/get_problem_hash.py"
+
+# DOMAIN_NAME: Name of the planning domain (e.g., blocksworld)
+DOMAIN_NAME="blocksworld"
+
+# ENCODING_TYPE: The state encoding to use. Options: "bin", "sas"
+ENCODING_TYPE="sas"
 
 # MIN_BLOCKS & MAX_BLOCKS: Range of block numbers for problem generation
-MIN_BLOCKS_TO_GENERATE=4
-MAX_BLOCKS_TO_GENERATE=4
+MIN_BLOCKS_TO_GENERATE=5
+MAX_BLOCKS_TO_GENERATE=5
+
+# This will be the root for raw_problems and processed_trajectories
+BASE_DATA_DIR="./data"
 
 # PROBLEMS_PER_CONFIG: Number of problems to generate for each block count
 PROBLEMS_PER_CONFIG=10000
@@ -39,56 +48,60 @@ FD_TIMEOUT="60s"
 # Common ones: "astar(lmcut())", "astar(ipdb())", "astar(blind())"
 FD_SEARCH_CONFIG="astar(lmcut())"
 
-# ENCODING_TYPE: The state encoding to use. Options: "bin", "sas"
-ENCODING_TYPE="sas"
-
 # Helper Script Check
-if [ ! -f "$PARSER_ENCODER_SCRIPT" ]; then
-    echo "Error: Parser/Encoder script '$PARSER_ENCODER_SCRIPT' not found."
-    echo "Please ensure it exists and is executable."
+if [ ! -f "$PARSER_ENCODER_SCRIPT" ] || [ ! -f "$ANALYZE_AND_SPLIT_SCRIPT" ] || [ ! -f "$GET_PROBLEM_HASH_SCRIPT" ]; then
+    echo "Error: Required Python scripts not found. Ensure they exist and are executable."
     exit 1
 fi
-# Ensure output directory exists
-# If it exists, ask the user if they want to overwrite it or use a new one
-if [ -d "$OUTPUT_DIR" ]; then
-    read -p "Output directory '$OUTPUT_DIR' already exists. Overwrite contents of subfolders for selected block sizes? (y/n): " overwrite_choice
-    if [ "$overwrite_choice" != "y" ]; then
-        read -p "Enter new base output directory name (e.g., data_new): " new_output_dir
-        if [ -n "$new_output_dir" ]; then # Check if user provided a new name
-        OUTPUT_DIR="./$new_output_dir"
-        else
-            echo "No new directory name provided. Exiting."
-            exit 1
-        fi
-    fi
-fi
 
-mkdir -p "$OUTPUT_DIR"
-# Subdirectories will be created inside the block-specific folders
+# Define root directories for raw and processed data
+RAW_PROBLEMS_ROOT="${BASE_DATA_DIR}/raw_problems/${DOMAIN_NAME}"
+PROCESSED_TRAJECTORIES_ROOT="${BASE_DATA_DIR}/processed_trajectories/${DOMAIN_NAME}"
+
+mkdir -p "$RAW_PROBLEMS_ROOT"
+mkdir -p "$PROCESSED_TRAJECTORIES_ROOT"
 
 TOTAL_SUCCESSFUL=0
 TOTAL_FAILED_GENERATION=0
 TOTAL_FAILED_FD=0
 TOTAL_FAILED_VAL=0
 TOTAL_FAILED_ENCODING=0
+TOTAL_DUPLICATES_FILTERED=0
 
 echo "Starting dataset generation..."
-echo "Domain: $DOMAIN_FILE"
-echo "Base Output Directory: $OUTPUT_DIR"
+echo "Domain PDDL: $DOMAIN_FILE"
+echo "Raw Problems Root: $RAW_PROBLEMS_ROOT"
+echo "Processed Trajectories Root: $PROCESSED_TRAJECTORIES_ROOT"
+echo "Encoding Type: $ENCODING_TYPE"
 echo "***********************************"
 
 for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
-    # BLOCK_SPECIFIC_DATA_DIR is where manifest, pddl, plans, trajectories for this num_blocks go
-    BLOCK_SPECIFIC_DATA_DIR="${OUTPUT_DIR}/blocks_${num_blocks}".
-    echo "Generating problems for $num_blocks blocks into $BLOCK_SPECIFIC_DATA_DIR..."
+    # Define block-specific directories for raw and processed data
+    RAW_BLOCK_DIR="${RAW_PROBLEMS_ROOT}/N${num_blocks}"
+    PROCESSED_BLOCK_ENCODING_DIR="${PROCESSED_TRAJECTORIES_ROOT}/N${num_blocks}/${ENCODING_TYPE}"
 
-    mkdir -p "$BLOCK_SPECIFIC_DATA_DIR/pddl"
-    mkdir -p "$BLOCK_SPECIFIC_DATA_DIR/plans"
-    mkdir -p "$BLOCK_SPECIFIC_DATA_DIR/val_out"
-    mkdir -p "$BLOCK_SPECIFIC_DATA_DIR/trajectories_text"
-    mkdir -p "$BLOCK_SPECIFIC_DATA_DIR/trajectories_bin"
+    # Ask user about overwriting if the processed outputs already exists
+    if [ -d "$PROCESSED_BLOCK_ENCODING_DIR" ]; then
+        read -p "Processed trajectories directory '$PROCESSED_BLOCK_ENCODING_DIR' already exists. Overwrite contents of subfolders for selected block sizes? (y/n): " overwrite_choice
+        if [ "$overwrite_choice" != "y" ]; then
+            echo "Skipping generation for $num_blocks blocks."
+            continue
+        fi
+    fi
+    
+    echo "Generating problems for $num_blocks blocks into $RAW_BLOCK_DIR and $PROCESSED_BLOCK_ENCODING_DIR..."
+
+    mkdir -p "$RAW_BLOCK_DIR/pddl"
+    mkdir -p "$RAW_BLOCK_DIR/plans"
+    mkdir -p "$RAW_BLOCK_DIR/val_out"
+    mkdir -p "$RAW_BLOCK_DIR/trajectories_text"
+    mkdir -p "$RAW_BLOCK_DIR/splits" # For train/val/test files
+    mkdir -p "$PROCESSED_BLOCK_ENCODING_DIR"
 
     successful_for_size=0
+
+    # Temporary file to store unique problem hashes for the current num_blocks
+    UNIQUE_HASHES_FILE="${RAW_BLOCK_DIR}/.unique_problem_hashes_N${num_blocks}.tmp"
 
     # Define the ordered list of all possible predicates for this num_blocks
     # This is crucial for consistent binary encoding.
@@ -99,14 +112,13 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
         SEED=$(( (num_blocks * 1000) + i )) # Simple way to get different seeds
         PROBLEM_BASENAME="blocks_${num_blocks}_problem_${i}"
 
-        PDDL_FILE="${BLOCK_SPECIFIC_DATA_DIR}/pddl/${PROBLEM_BASENAME}.pddl"
-        PLAN_FILE="${BLOCK_SPECIFIC_DATA_DIR}/plans/${PROBLEM_BASENAME}.plan"
-        VAL_OUTPUT_FILE="${BLOCK_SPECIFIC_DATA_DIR}/val_out/${PROBLEM_BASENAME}.val.log"
+        PDDL_FILE="${RAW_BLOCK_DIR}/pddl/${PROBLEM_BASENAME}.pddl"
+        PLAN_FILE="${RAW_BLOCK_DIR}/plans/${PROBLEM_BASENAME}.plan"
+        VAL_OUTPUT_FILE="${RAW_BLOCK_DIR}/val_out/${PROBLEM_BASENAME}.val.log"
 
         # For parse_and_encode.py outputs
-        TEXT_TRAJECTORY_FILE="${BLOCK_SPECIFIC_DATA_DIR}/trajectories_text/${PROBLEM_BASENAME}.traj.txt"
-        BINARY_TRAJECTORY_FILE="${BLOCK_SPECIFIC_DATA_DIR}/trajectories_bin/${PROBLEM_BASENAME}.traj.bin" # Or .npz, .pt, etc.
-        GOAL_BINARY_FILE="${BLOCK_SPECIFIC_DATA_DIR}/trajectories_bin/${PROBLEM_BASENAME}.goal.bin"
+        TEXT_TRAJECTORY_FILE="${RAW_BLOCK_DIR}/trajectories_text/${PROBLEM_BASENAME}.traj.txt"
+        BINARY_TRAJECTORY_FILE_PREFIX="${PROCESSED_BLOCK_ENCODING_DIR}/${PROBLEM_BASENAME}" # .traj.<encoding>.npy will be appended
 
         echo -e "\n"
         echo "  Processing: $PROBLEM_BASENAME (Seed: $SEED)"
@@ -166,37 +178,61 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
             --num_blocks "$num_blocks" \
             --encoding_type "$ENCODING_TYPE" \
             --text_trajectory_output "$TEXT_TRAJECTORY_FILE" \
-            --binary_trajectory_output "$BINARY_TRAJECTORY_FILE" \
-            --binary_goal_output "$GOAL_BINARY_FILE" \
-            --manifest_output_dir "$BLOCK_SPECIFIC_DATA_DIR" # Manifest/info goes into blocks_N dir
-        
+            --binary_output_prefix "$BINARY_TRAJECTORY_FILE_PREFIX" \
+            --raw_data_dir "$RAW_BLOCK_DIR" # Manifest/info goes into raw_problems/blocksworld/N<num_blocks> dir
+
         if [ $? -ne 0 ]; then
             echo "    ERROR: Parsing/Encoding failed for $PROBLEM_BASENAME"
             TOTAL_FAILED_ENCODING=$((TOTAL_FAILED_ENCODING + 1))
             continue
         fi
 
-        # If we reach here, everything was successful for this problem
-        echo "    SUCCESS: $PROBLEM_BASENAME processed."
-        successful_for_size=$((successful_for_size + 1))
-        TOTAL_SUCCESSFUL=$((TOTAL_SUCCESSFUL + 1))
+        # Check for uniqueness based on initial/goal states from the generated text trajectory
+        PROBLEM_HASH=$(uv run python "$GET_PROBLEM_HASH_SCRIPT" "$TEXT_TRAJECTORY_FILE")
+        if [ $? -ne 0 ] || [ -z "$PROBLEM_HASH" ]; then
+            echo "    ERROR: Failed to get problem hash for $PROBLEM_BASENAME. Skipping."
+            TOTAL_FAILED_ENCODING=$((TOTAL_FAILED_ENCODING + 1)) # Count as encoding failure
+            # Clean up files generated so far for this failed problem
+            rm -f "$PDDL_FILE" "$PLAN_FILE" "$VAL_OUTPUT_FILE" "$TEXT_TRAJECTORY_FILE" \
+                  "${BINARY_TRAJECTORY_FILE_PREFIX}.traj.${ENCODING_TYPE}.npy" \
+                  "${BINARY_TRAJECTORY_FILE_PREFIX}.goal.${ENCODING_TYPE}.npy"
+            continue
+        fi
+
+        if grep -q "$PROBLEM_HASH" "$UNIQUE_HASHES_FILE"; then
+            echo "    DUPLICATE: Problem $PROBLEM_BASENAME (hash $PROBLEM_HASH) is a duplicate. Removing files."
+            TOTAL_DUPLICATES_FILTERED=$((TOTAL_DUPLICATES_FILTERED + 1))
+            # Clean up all files generated for this duplicate problem
+            rm -f "$PDDL_FILE" "$PLAN_FILE" "$VAL_OUTPUT_FILE" "$TEXT_TRAJECTORY_FILE" \
+                  "${BINARY_TRAJECTORY_FILE_PREFIX}.traj.${ENCODING_TYPE}.npy" \
+                  "${BINARY_TRAJECTORY_FILE_PREFIX}.goal.${ENCODING_TYPE}.npy"
+            # Do NOT increment successful_for_size or TOTAL_SUCCESSFUL
+        else
+            # If unique, add hash to tracker and count as successful
+            echo "$PROBLEM_HASH" >> "$UNIQUE_HASHES_FILE"
+            echo "    SUCCESS: $PROBLEM_BASENAME processed and is unique."
+            successful_for_size=$((successful_for_size + 1))
+            TOTAL_SUCCESSFUL=$((TOTAL_SUCCESSFUL + 1))
+        fi
+    
     done
     echo -e "\n"
     echo "  Finished $num_blocks blocks. Successful: $successful_for_size / $PROBLEMS_PER_CONFIG"
+    rm -f "$UNIQUE_HASHES_FILE" # Clean up temporary hash file
 
     # 5. Analyze dataset and create train-test splits
     # Call to `analyze_dataset_splits.py` with arguments: 
         # `dataset_dir`: Path to the root directory of the generated dataset (containing 'plans' subdirectory).
-        # `output_dir`: Directory to save the split files (train_files.txt, etc.) and distribution plots.
+        # `output_dir`: Directory to save the split files (train_files.txt, etc.) and distribution plots. This will be RAW_BLOCK_DIR/splits
     echo -e "\n"
     echo "Analyzing dataset splits for $num_blocks blocks..."
     uv run python "$ANALYZE_AND_SPLIT_SCRIPT" \
-        "$BLOCK_SPECIFIC_DATA_DIR" "$BLOCK_SPECIFIC_DATA_DIR"
+        "$RAW_BLOCK_DIR"
 
     if [ $? -ne 0 ]; then
         echo "ERROR: Dataset analysis failed for $PROBLEM_BASENAME"
         TOTAL_FAILED_ENCODING=$((TOTAL_FAILED_ENCODING + 1))
-        continue
+        # Do not continue, as this is a critical step for the entire N-block dataset
     fi
     echo "***********************************"
     echo -e "\n"
@@ -209,4 +245,5 @@ echo "  Total Failed PDDL Generation: $TOTAL_FAILED_GENERATION"
 echo "  Total Failed Fast Downward:   $TOTAL_FAILED_FD"
 echo "  Total Failed VAL Validation:  $TOTAL_FAILED_VAL"
 echo "  Total Failed Encoding:        $TOTAL_FAILED_ENCODING"
+echo "  Total Duplicate Problems Filtered: $TOTAL_DUPLICATES_FILTERED"
 echo "***********************************"

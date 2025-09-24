@@ -521,20 +521,30 @@ def compute_aggregated_metrics(
 
 # ** Main Benchmarking Logic **
 def run_benchmark(args: argparse.Namespace):
-    data_root_dir = Path(args.dataset_dir)
+    raw_block_dir = Path(args.dataset_dir)
     num_blocks = args.num_blocks
     model_type = args.model_type
-    data_root_dir = Path(args.dataset_dir)
     model_path = Path(args.model_path)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Construct the PROCESSED_BLOCK_ENCODING_DIR
+    # This assumes a structure like data/raw_problems/blocksworld/N4 and data/processed_trajectories/blocksworld/N4/bin
+    processed_block_encoding_dir = (
+        raw_block_dir.parent.parent
+        / "processed_trajectories"
+        / raw_block_dir.parent.name
+        / raw_block_dir.name
+        / args.encoding_type
+    )
+
     # Construct paths based on num_blocks
-    if not data_root_dir.exists():
-        print(f"ERROR: Block-specific data directory not found: {data_root_dir}")
+    if not raw_block_dir.exists():
+        print(f"ERROR: Raw problem data directory not found: {raw_block_dir}")
         return
 
-    test_split_file = data_root_dir / "test_files.txt"
+    test_split_file = raw_block_dir / "splits" / "test_files.txt"  # Split files are now in a 'splits' subdir
+
     problem_basenames = load_problem_basenames_from_split_file(test_split_file)
     if not problem_basenames:
         print(f"No test problems found in {test_split_file}. Exiting.")
@@ -551,22 +561,19 @@ def run_benchmark(args: argparse.Namespace):
     validator = None
     if args.encoding_type == "bin":
         # Construct the path to the predicate manifest for the specific num_blocks
-        predicate_manifest_file = data_root_dir / f"predicate_manifest_{num_blocks}.txt"
-        if not predicate_manifest_file.exists():
-            print(f"ERROR: Predicate manifest file not found: {predicate_manifest_file}")
-            return
         try:
-            validator = BlocksWorldValidator(
-                num_blocks, args.encoding_type, predicate_manifest_file=predicate_manifest_file
-            )
+            validator = BlocksWorldValidator(num_blocks, args.encoding_type, raw_data_dir=raw_block_dir)
             print(f"Validator initialized with state_size={validator.state_size}.")
         except Exception as e:
+            print(f"ERROR: Predicate manifest not found at {raw_block_dir / f'predicate_manifest_{num_blocks}.txt'}.")
+            print("Please ensure the manifest file exists in the raw_data_dir.")
             print(f"ERROR: Failed to initialize BlocksWorldValidator for binary encoding: {e}")
             return
     elif args.encoding_type == "sas":
         try:
             # SAS encoding does not require a predicate manifest file.
-            validator = BlocksWorldValidator(num_blocks, args.encoding_type)
+            # But the validator constructor still expects raw_data_dir
+            validator = BlocksWorldValidator(num_blocks, args.encoding_type, raw_data_dir=raw_block_dir)
             print(f"Validator initialized with state_size={validator.state_size}.")
         except Exception as e:
             print(f"ERROR: Failed to initialize BlocksWorldValidator for SAS encoding: {e}")
@@ -586,7 +593,7 @@ def run_benchmark(args: argparse.Namespace):
             args.encoding_type,
             args.seed,
             context_window_size=args.xgboost_context_window_size,
-            dataset_dir=data_root_dir,
+            dataset_dir=raw_block_dir,
             llama_use_few_shot=args.llama_use_few_shot,
         )
     except ValueError as e:
@@ -620,8 +627,8 @@ def run_benchmark(args: argparse.Namespace):
     for i, basename in enumerate(problem_basenames):
         print(f"  Processing problem {i + 1}/{len(problem_basenames)}: {basename} ...", end="", flush=True)
 
-        traj_bin_path = data_root_dir / "trajectories_bin" / f"{basename}.traj.{args.encoding_type}.npy"
-        goal_bin_path = data_root_dir / "trajectories_bin" / f"{basename}.goal.{args.encoding_type}.npy"
+        traj_bin_path = processed_block_encoding_dir / f"{basename}.traj.{args.encoding_type}.npy"
+        goal_bin_path = processed_block_encoding_dir / f"{basename}.goal.{args.encoding_type}.npy"
 
         if not traj_bin_path.exists() or not goal_bin_path.exists():
             print(" skipped (data files missing).")
@@ -714,7 +721,10 @@ def run_benchmark(args: argparse.Namespace):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="PaTS Model Benchmarking Script")
     parser.add_argument(
-        "--dataset_dir", type=str, required=True, help="Directory of the PaTS dataset (e.g., 'data/blocks_4')"
+        "--dataset_dir",
+        type=Path,
+        required=True,
+        help="Path to the raw problem data directory for a specific N (e.g., 'data/raw_problems/blocksworld/N4')",
     )
     parser.add_argument("--num_blocks", type=int, required=True, help="Number of blocks for the problems to benchmark.")
     parser.add_argument(

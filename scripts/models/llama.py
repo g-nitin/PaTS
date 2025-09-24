@@ -39,7 +39,6 @@ def get_llama_model_and_tokenizer(model_id: str, device: torch.device):
 
         _llama_model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            # quantization_config=bnb_config, # REMOVE THIS LINE
             torch_dtype=torch.bfloat16,  # Keep this for bfloat16 precision
             device_map="auto",  # Keep this for automatic device mapping
         )

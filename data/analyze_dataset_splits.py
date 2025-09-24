@@ -1,6 +1,8 @@
 import argparse
+import hashlib
 import os
 import random
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -31,29 +33,72 @@ def get_plan_length(plan_filepath):
     return count
 
 
-def analyze_and_split_plans(
-    dataset_dir, output_dir, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=13, plot_kde=False
-):
+def analyze_and_split_plans(dataset_dir, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=13, plot_kde=False):
     """
     Analyzes plan length distribution and creates stratified train/val/test splits.
     Generates a combined plot for train, val, test distributions.
     """
     random.seed(seed)
-    np.random.seed(seed)
 
-    plans_dir = os.path.join(dataset_dir, "plans")
-    if not os.path.isdir(plans_dir):
-        print(f"Error: Plans directory not found at {plans_dir}")
+    np.random.seed(seed)  # For numpy operations like shuffling
+
+    plans_dir = dataset_dir / "plans"
+    trajectories_text_dir = dataset_dir / "trajectories_text"  # For initial/goal state parsing
+    splits_output_dir = dataset_dir / "splits"  # New output directory for splits
+
+    if not plans_dir.is_dir() or not trajectories_text_dir.is_dir():
+        print(f"Error: Required directories not found at {plans_dir} or {trajectories_text_dir}")
         return
 
-    plan_files_data = []  # List of tuples (basename, plan_length, full_plan_path)
+    # Ensure the splits output directory exists
+    splits_output_dir.mkdir(parents=True, exist_ok=True)
+
+    plan_files_data = []  # List of dicts (basename, plan_length, unique_problem_id)
+    unique_problem_ids = set()  # To count unique (initial, goal) pairs
+
     for filename in os.listdir(plans_dir):
         if filename.endswith(".plan"):
             problem_basename = filename.replace(".plan", "")
-            plan_filepath = os.path.join(plans_dir, filename)
+            plan_filepath = plans_dir / filename
             length = get_plan_length(plan_filepath)
+
+            # Load initial and goal states to create a unique problem ID
             if length > 0:  # Only consider problems with valid plans
-                plan_files_data.append({"basename": problem_basename, "length": length, "path": plan_filepath})
+                try:
+                    # We need to load the initial and goal states to create a unique ID.
+                    # For analyze_dataset_splits, we can use the text trajectories for hashing,
+                    # as the binary ones might not exist yet for all encoding types.
+                    # The text trajectory file contains initial state predicates and goal predicates.
+                    text_traj_path = trajectories_text_dir / f"{problem_basename}.traj.txt"
+                    if not text_traj_path.exists():
+                        print(f"Warning: Text trajectory file for {problem_basename} not found. Skipping.")
+                        continue
+
+                    initial_state_str = ""
+                    goal_state_str = ""
+                    with open(text_traj_path, "r") as f:
+                        lines = f.readlines()
+                        # Initial state is the first state in the trajectory
+                        # Goal state is usually at the end, marked with "Goal Predicates:"
+                        if len(lines) > 0:
+                            initial_state_str = lines[0].strip()
+                        for line in lines:
+                            if "Goal Predicates:" in line:
+                                goal_state_str = line.split("Goal Predicates:")[1].strip()
+                                break
+
+                    # Create a unique identifier for the (initial, goal) pair
+                    # Hash the string representations for a stable, unique ID
+                    initial_goal_hash = hashlib.sha256((initial_state_str + goal_state_str).encode("utf-8")).hexdigest()
+
+                    plan_files_data.append(
+                        {"basename": problem_basename, "length": length, "unique_problem_id": initial_goal_hash}
+                    )
+                    unique_problem_ids.add(initial_goal_hash)
+
+                except Exception as e:
+                    print(f"Warning: Could not load state data for {problem_basename}: {e}. Skipping.")
+
             else:
                 print(f"Warning: Plan for {problem_basename} has length 0 or could not be read. Skipping.")
 
@@ -62,7 +107,7 @@ def analyze_and_split_plans(
         return
 
     df = pd.DataFrame(plan_files_data)
-    os.makedirs(output_dir, exist_ok=True)  # Ensure output_dir exists early
+    splits_output_dir.mkdir(parents=True, exist_ok=True)  # Ensure splits output directory exists
 
     # ** 1. Analyze Overall Plan Length Distribution **
     print("\n** Overall Plan Length Distribution Analysis **")
@@ -108,7 +153,7 @@ def analyze_and_split_plans(
     else:
         plt.text(0.5, 0.5, "No data to plot for overall distribution.", ha="center", va="center")
 
-    distribution_plot_path = os.path.join(output_dir, "plan_length_distribution_overall.png")
+    distribution_plot_path = splits_output_dir / "plan_length_distribution_overall.png"
     plt.savefig(distribution_plot_path, dpi=150, bbox_inches="tight")
     print(f"Overall plan length distribution plot saved to: {distribution_plot_path}")
     plt.close()
@@ -128,53 +173,38 @@ def analyze_and_split_plans(
         print("Error: All ratios are zero. Cannot split.")
         return
 
-    grouped_by_length = df.groupby("length")
+    # Group by unique_problem_id first
+    grouped_by_unique_id = df.groupby("unique_problem_id")
+
+    # Collect all unique problem IDs
+    all_unique_ids = list(grouped_by_unique_id.groups.keys())
+    random.shuffle(all_unique_ids)  # Shuffle unique IDs before splitting
+
+    # Determine split sizes for unique IDs
+    n_total_unique = len(all_unique_ids)
+    n_train_unique = int(np.floor(train_ratio * n_total_unique))
+    n_val_unique = int(np.floor(val_ratio * n_total_unique))
+
+    train_unique_ids = all_unique_ids[:n_train_unique]
+    val_unique_ids = all_unique_ids[n_train_unique : n_train_unique + n_val_unique]
+    test_unique_ids = all_unique_ids[n_train_unique + n_val_unique :]
+
     train_basenames, val_basenames, test_basenames = [], [], []
 
-    for length, group_df in grouped_by_length:
-        instances = group_df["basename"].tolist()
-        random.shuffle(instances)
-        n_total = len(instances)
-        n_train = int(np.floor(train_ratio * n_total))
-        n_val = int(np.floor(val_ratio * n_total))
-
-        # Distribute remainder to ensure sum is n_total
-        # Prioritize test set for its exact rounded share if possible, then adjust val
-        n_test_ideal = int(np.round(test_ratio * n_total))
-        current_alloc = n_train + n_val
-        if current_alloc + n_test_ideal > n_total:
-            n_test = n_total - current_alloc
-            if n_test < 0:  # Should not happen if ratios sum to 1
-                n_val = n_val + n_test  # reduce n_val
-                n_test = 0
-        else:
-            n_test = n_total - current_alloc  # Default remainder to test
-
-        # Remainder distribution
-        remainder = n_total - (n_train + n_val + n_test)
-        if remainder > 0:
-            # Distribute remainder based on original proportions (simplistic: add to largest proportion first or test)
-            if test_ratio >= train_ratio and test_ratio >= val_ratio:
-                n_test += remainder
-            elif train_ratio >= val_ratio:
-                n_train += remainder
-            else:
-                n_val += remainder
-        # Ensure no split is negative after adjustment
-        n_train = max(0, n_train)
-        n_val = max(0, n_val)
-        n_test = max(0, n_total - n_train - n_val)
-
-        train_basenames.extend(instances[:n_train])
-        val_basenames.extend(instances[n_train : n_train + n_val])
-        test_basenames.extend(instances[n_train + n_val : n_train + n_val + n_test])
-        print(f"Length {length} (count {n_total}): Train={n_train}, Val={n_val}, Test={n_test}")
+    # Populate basenames for each split
+    for unique_id in train_unique_ids:
+        train_basenames.extend(grouped_by_unique_id.get_group(unique_id)["basename"].tolist())
+    for unique_id in val_unique_ids:
+        val_basenames.extend(grouped_by_unique_id.get_group(unique_id)["basename"].tolist())
+    for unique_id in test_unique_ids:
+        test_basenames.extend(grouped_by_unique_id.get_group(unique_id)["basename"].tolist())
 
     # Shuffle the final lists as well, as items were added group by group
     random.shuffle(train_basenames)
     random.shuffle(val_basenames)
     random.shuffle(test_basenames)
 
+    print(f"\nTotal unique (initial, goal) problem instances: {len(unique_problem_ids)}")
     print(f"\nTotal problems processed: {len(df)}")
     print(f"Train set size: {len(train_basenames)}")
     print(f"Validation set size: {len(val_basenames)}")
@@ -182,7 +212,7 @@ def analyze_and_split_plans(
 
     # ** 3. Save Split Files **
     for split_name, basenames_list in [("train", train_basenames), ("val", val_basenames), ("test", test_basenames)]:
-        filepath = os.path.join(output_dir, f"{split_name}_files.txt")
+        filepath = splits_output_dir / f"{split_name}_files.txt"
         with open(filepath, "w") as f:
             for basename in basenames_list:
                 f.write(basename + "\n")
@@ -218,8 +248,8 @@ def analyze_and_split_plans(
     if not all_lengths_list:
         print("No data in any split to plot. Skipping combined histogram.")
         plt.text(0.5, 0.5, "No data in any split to plot.", ha="center", va="center")
-        plt.savefig(
-            os.path.join(output_dir, "plan_length_distribution_splits_combined.png"), dpi=150, bbox_inches="tight"
+        plt.savefig(  # Use splits_output_dir
+            splits_output_dir / "plan_length_distribution_splits_combined.png", dpi=150, bbox_inches="tight"
         )
         plt.close()
         return
@@ -228,8 +258,8 @@ def analyze_and_split_plans(
     if all_lengths_combined.empty:  # Should be caught by previous check, but good for safety
         print("Combined data is empty. Skipping combined histogram.")
         plt.text(0.5, 0.5, "No data in any split to plot.", ha="center", va="center")
-        plt.savefig(
-            os.path.join(output_dir, "plan_length_distribution_splits_combined.png"), dpi=150, bbox_inches="tight"
+        plt.savefig(  # Use splits_output_dir
+            splits_output_dir / "plan_length_distribution_splits_combined.png", dpi=150, bbox_inches="tight"
         )
         plt.close()
         return
@@ -304,7 +334,7 @@ def analyze_and_split_plans(
 
     plt.tight_layout()
 
-    combined_plot_path = os.path.join(output_dir, "plan_length_distribution_splits_combined.png")
+    combined_plot_path = splits_output_dir / "plan_length_distribution_splits_combined.png"
     plt.savefig(combined_plot_path, dpi=150, bbox_inches="tight")
     print(f"\nCombined distribution plot for splits saved to: {combined_plot_path}")
     plt.close()
@@ -314,25 +344,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="Analyze plan length distribution and create stratified train/val/test splits."
     )
+# dataset_dir is now the RAW_BLOCK_DIR (e.g., data/raw_problems/blocksworld/N4)
     parser.add_argument(
-        "dataset_dir",
-        type=str,
-        help="Path to the root directory of the generated dataset (containing 'plans' subdirectory).",
+        "raw_block_dir",
+        type=Path,
+        help="Path to the raw problem data directory for a specific N (e.g., data/raw_problems/blocksworld/N4).",
     )
-    parser.add_argument(
-        "output_dir",
-        type=str,
-        help="Directory to save the split files (train_files.txt, etc.) and distribution plots.",
-    )
-    parser.add_argument(
-        "--train_ratio", type=float, default=0.7, help="Proportion of data for training. Default is 0.7."
-    )
-    parser.add_argument(
-        "--val_ratio", type=float, default=0.15, help="Proportion of data for validation. Default is 0.15."
-    )
-    parser.add_argument(
-        "--test_ratio", type=float, default=0.15, help="Proportion of data for testing. Default is 0.15."
-    )
+    parser.add_argument("--train_ratio", type=float, default=0.7, help="Proportion of data for training. Default is 0.7.")
+    parser.add_argument("--val_ratio", type=float, default=0.15, help="Proportion of data for validation. Default is 0.15.")
+    parser.add_argument("--test_ratio", type=float, default=0.15, help="Proportion of data for testing. Default is 0.15.")
     parser.add_argument("--seed", type=int, default=13, help="Random seed for reproducibility. Default is 13.")
     parser.add_argument(
         "--plot_kde",
@@ -353,9 +373,7 @@ def main():
         return
     # Normalization if sum is not 1.0 is handled in analyze_and_split_plans
 
-    analyze_and_split_plans(
-        args.dataset_dir, args.output_dir, args.train_ratio, args.val_ratio, args.test_ratio, args.seed, args.plot_kde
-    )
+    analyze_and_split_plans(args.raw_block_dir, args.train_ratio, args.val_ratio, args.test_ratio, args.seed, args.plot_kde)
 
 
 if __name__ == "__main__":

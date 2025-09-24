@@ -1,6 +1,5 @@
 import argparse
 import json
-import os
 import re
 from pathlib import Path
 
@@ -292,13 +291,18 @@ def main():
     parser.add_argument("--val_output_file", required=True, help="Path to VAL's verbose output file.")
     parser.add_argument("--pddl_domain_file", required=True, help="Path to the PDDL domain file (for pddlpy).")
     parser.add_argument("--pddl_problem_file", required=True, help="Path to the PDDL problem file.")
-    parser.add_argument("--num_blocks", required=True, type=int, help="Number of blocks (for master predicate list).")
+    parser.add_argument("--num_blocks", required=True, type=int, help="Number of blocks.")
     parser.add_argument("--text_trajectory_output", required=True, help="Path to save text-based predicate trajectory.")
     parser.add_argument(
-        "--binary_trajectory_output", required=True, help="Path to save binary encoded state trajectory (.npy)."
+        "--binary_output_prefix",
+        required=True,
+        help="Prefix for saving binary encoded state trajectory and goal state (.npy). E.g., 'data/processed_trajectories/blocksworld/N4/bin/blocks_4_problem_1'",
     )
-    parser.add_argument("--binary_goal_output", required=True, help="Path to save binary encoded goal state (.npy).")
-    parser.add_argument("--manifest_output_dir", required=True, help="Directory to save the predicate manifest file.")
+    parser.add_argument(
+        "--raw_data_dir",
+        required=True,
+        help="Root directory for raw problem data (e.g., data/raw_problems/blocksworld/N4) where encoding_info and manifest files are saved.",
+    )
     parser.add_argument(
         "--encoding_type",
         type=str,
@@ -315,6 +319,7 @@ def main():
     try:
         # Generate block names once
         block_names = [f"b{i + 1}" for i in range(args.num_blocks)]
+        raw_data_path = Path(args.raw_data_dir)  # Use raw_data_dir for manifest/info
 
         # 1. Generate encoding-specific information
         if args.encoding_type == "bin":
@@ -324,9 +329,11 @@ def main():
                 exit(1)
 
             # Save the predicate manifest
-            manifest_dir = Path(args.manifest_output_dir)
-            manifest_dir.mkdir(parents=True, exist_ok=True)
-            manifest_file_path = manifest_dir / f"predicate_manifest_{args.num_blocks}.txt"
+            raw_data_path.mkdir(parents=True, exist_ok=True)  # Ensure it exists
+            manifest_file_path = raw_data_path / f"predicate_manifest_{args.num_blocks}.txt"
+
+            raw_data_path.mkdir(parents=True, exist_ok=True)  # Ensure it exists
+            manifest_file_path = raw_data_path / f"predicate_manifest_{args.num_blocks}.txt"
             with open(manifest_file_path, "w") as f_manifest:
                 for pred_item in ordered_master_pred_list:
                     f_manifest.write(f"{pred_item}\n")
@@ -344,7 +351,7 @@ def main():
             raise ValueError(f"Unknown encoding type: {args.encoding_type}")
 
         # Save the encoding info file
-        encoding_info_path = Path(args.manifest_output_dir) / f"encoding_info_{args.num_blocks}.json"
+        encoding_info_path = raw_data_path / f"encoding_info_{args.num_blocks}.json"
         with open(encoding_info_path, "w") as f_info:
             json.dump(encoding_info, f_info, indent=4)
         print(f"    INFO: Encoding info saved to: {encoding_info_path}")
@@ -409,17 +416,19 @@ def main():
         else:  # sas
             goal_vector_np = state_preds_to_sas_vector(goal_state_preds_normalized_set, args.num_blocks, block_names)
 
-        # 6. Save outputs with new naming convention
-        base_traj_path = Path(args.binary_trajectory_output)
-        traj_output_path = base_traj_path.with_suffix(f".{args.encoding_type}.npy")
+        # 6. Save text trajectory
+        # The directory for text_trajectory_output should already be created by generate_dataset.sh
+        with open(args.text_trajectory_output, "w") as f:
+            for state_preds_list in state_trajectory_pred_strings_list:
+                f.write(f"{' '.join(state_preds_list)}\n")
+            # Also write the goal predicates for analyze_dataset_splits.py to use
+            f.write("Goal Predicates: " + " ".join(sorted(list(goal_state_preds_normalized_set))) + "\n")
 
-        base_goal_path = Path(args.binary_goal_output)
-        goal_output_path = base_goal_path.with_suffix(f".{args.encoding_type}.npy")
+        # 7. Save binary outputs with new naming convention
+        traj_output_path = Path(f"{args.binary_output_prefix}.traj.{args.encoding_type}.npy")
+        goal_output_path = Path(f"{args.binary_output_prefix}.goal.{args.encoding_type}.npy")
 
-        os.makedirs(os.path.dirname(traj_output_path), exist_ok=True)
-        np.save(traj_output_path, trajectory_np)
-
-        os.makedirs(os.path.dirname(goal_output_path), exist_ok=True)
+        traj_output_path.parent.mkdir(parents=True, exist_ok=True)  # Ensure processed_trajectories dir exists
         np.save(goal_output_path, goal_vector_np)
 
         traj_len = trajectory_np.shape[0] if trajectory_np.ndim > 0 and trajectory_np.size > 0 else 0

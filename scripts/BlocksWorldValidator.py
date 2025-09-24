@@ -28,22 +28,20 @@ class ValidationResult:
 
 
 class BlocksWorldValidator:
-    def __init__(self, num_blocks: int, encoding_type: str, predicate_manifest_file: Optional[str | Path] = None):
+    def __init__(self, num_blocks: int, encoding_type: str, raw_data_dir: Path):
         """
         Initialize validator for a specific number of blocks and encoding type.
 
         :param num_blocks: The number of blocks in the domain.
         :param encoding_type: The encoding type, either 'bin' or 'sas'.
-        :param predicate_manifest_file: Path to the predicate manifest. Required for 'bin' encoding.
+        :param raw_data_dir: Path to the raw problem data directory for this N (e.g., data/raw_problems/blocksworld/N4). This is where predicate_manifest_N.txt is located.
         """
         self.num_blocks = num_blocks
         self.encoding_type = encoding_type
         self.block_names: List[str] = [f"b{i + 1}" for i in range(self.num_blocks)]
 
         if self.encoding_type == "bin":
-            if predicate_manifest_file is None:
-                raise ValueError("predicate_manifest_file is required for 'bin' encoding.")
-            self.predicate_manifest_file = Path(predicate_manifest_file)
+            self.predicate_manifest_file = raw_data_dir / f"predicate_manifest_{num_blocks}.txt"
             # These will be populated by _setup_feature_indices_binary
             self.predicate_list: List[str] = []
             self.on_table_indices: Dict[str, int] = {}

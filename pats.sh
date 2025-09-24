@@ -19,8 +19,11 @@ echo "Python version: $(python --version)"
 
 model_type='llama'  # `lstm`, `ttm`, `xgboost`, `llama`
 num_blocks=4
-encoding='sas'  # `sas`, `bin`
-dataset_dir="data/blocks_${num_blocks}-${encoding}"
+domain_name="blocksworld"
+encoding='sas' # `sas`, `bin`
+
+RAW_BLOCK_DIR="data/raw_problems/$${domain_name}/N$${num_blocks}"
+PROCESSED_BLOCK_ENCODING_DIR="data/processed_trajectories/$${domain_name}/N$${num_blocks}/${encoding}"
 
 # Generate timestamp and build unique dirs/paths
 timestamp=$(date +%Y%m%d_%H%M%S)
@@ -37,8 +40,8 @@ if [ "$model_type" = 'lstm' ]; then
     echo "\n"
     python -m scripts.train_model \
         --model_type $model_type \
-        --dataset_dir "$dataset_dir" \
-        --dataset_split_dir "$dataset_dir" \
+        --dataset_dir "$RAW_BLOCK_DIR" \
+        --processed_data_dir "$PROCESSED_BLOCK_ENCODING_DIR" \
         --num_blocks "$num_blocks" \
         --encoding_type "$encoding" \
         --output_dir "${output_base_dir}" \
@@ -53,7 +56,7 @@ if [ "$model_type" = 'lstm' ]; then
     echo "\n"
     echo "Starting benchmarking with model: $model_type"
     python -m scripts.benchmark \
-        --dataset_dir "$dataset_dir" \
+        --dataset_dir "$RAW_BLOCK_DIR" \
         --num_blocks "$num_blocks" \
         --model_type "$model_type" \
         --model_path "$model_path" \
@@ -71,8 +74,8 @@ elif [ "$model_type" = 'ttm' ]; then
     echo "\n"
     python -m scripts.train_model \
         --model_type $model_type \
-        --dataset_dir "$dataset_dir" \
-        --dataset_split_dir "$dataset_dir" \
+        --dataset_dir "$RAW_BLOCK_DIR" \
+        --processed_data_dir "$PROCESSED_BLOCK_ENCODING_DIR" \
         --num_blocks "$num_blocks" \
         --encoding_type "$encoding" \
         --output_dir "${output_base_dir}" \
@@ -85,7 +88,7 @@ elif [ "$model_type" = 'ttm' ]; then
     echo "\n"
     echo "Starting benchmarking with model: $model_type"
     python -m scripts.benchmark \
-        --dataset_dir "$dataset_dir" \
+        --dataset_dir "$RAW_BLOCK_DIR" \
         --num_blocks "$num_blocks" \
         --model_type "$model_type" \
         --model_path "$model_path" \
@@ -103,8 +106,8 @@ elif [ "$model_type" = 'xgboost' ]; then
     echo "\n"
     python -m scripts.train_model \
         --model_type $model_type \
-        --dataset_dir "$dataset_dir" \
-        --dataset_split_dir "$dataset_dir" \
+        --dataset_dir "$RAW_BLOCK_DIR" \
+        --processed_data_dir "$PROCESSED_BLOCK_ENCODING_DIR" \
         --num_blocks "$num_blocks" \
         --encoding_type "$encoding" \
         --output_dir "${output_base_dir}" \
@@ -119,7 +122,7 @@ elif [ "$model_type" = 'xgboost' ]; then
     echo "\n"
     echo "Starting benchmarking with model: $model_type"
     python -m scripts.benchmark \
-        --dataset_dir "$dataset_dir" \
+        --dataset_dir "$RAW_BLOCK_DIR" \
         --num_blocks "$num_blocks" \
         --model_type "$model_type" \
         --model_path "$model_path" \
@@ -144,7 +147,7 @@ elif [ "$model_type" = 'llama' ]; then
     mkdir -p "$zero_shot_benchmark_output_dir"
 
     python -m scripts.benchmark \
-        --dataset_dir "$dataset_dir" \
+        --dataset_dir "$RAW_BLOCK_DIR" \
         --num_blocks "$num_blocks" \
         --model_type "$model_type" \
         --model_path "$model_path" \
@@ -164,7 +167,7 @@ elif [ "$model_type" = 'llama' ]; then
     mkdir -p "$few_shot_benchmark_output_dir"
 
     python -m scripts.benchmark \
-        --dataset_dir "$dataset_dir" \
+        --dataset_dir "$RAW_BLOCK_DIR" \
         --num_blocks "$num_blocks" \
         --model_type "$model_type" \
         --model_path "$model_path" \

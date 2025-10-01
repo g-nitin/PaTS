@@ -4,9 +4,11 @@ import warnings
 from datetime import datetime
 from pathlib import Path
 from pprint import pprint
-from typing import Tuple
+from typing import List, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -21,6 +23,44 @@ from scripts.models.xgboost import XGBoostPlanner
 from scripts.pats_dataset import PaTSDataset
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
+
+
+def plot_training_curves(
+    train_losses: List[float],
+    val_losses: List[float],
+    train_forecast_losses: List[float],
+    val_forecast_losses: List[float],
+    epochs: int,
+    model_type: str,
+    encoding_type: str,
+    num_blocks: int,
+    output_dir: Path,
+):
+    """
+    Plots and saves the training and validation loss curves.
+    """
+    if not train_losses or not val_losses:
+        print("No loss data to plot.")
+        return
+
+    sns.set_theme()  # Apply seaborn theme for aesthetics
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(range(1, epochs + 1), train_losses, label="Train Total Loss")
+    plt.plot(range(1, epochs + 1), val_losses, label="Validation Total Loss")
+    plt.plot(range(1, epochs + 1), train_forecast_losses, label="Train Forecast Loss", linestyle="--")
+    plt.plot(range(1, epochs + 1), val_forecast_losses, label="Validation Forecast Loss", linestyle="--")
+
+    plt.title(f"{model_type} Training & Validation Loss (N={num_blocks}, Encoding={encoding_type})")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.grid(True)
+
+    plot_filename = f"training_loss_{model_type}_N{num_blocks}_{encoding_type}.png"
+    plt.savefig(output_dir / plot_filename)
+    plt.close()  # Close the plot to free memory
+    print(f"Training loss plot saved to {output_dir / plot_filename}")
 
 
 def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, model_save_path):
@@ -78,6 +118,12 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
 
     best_val_loss = float("inf")
     sas_clamp_warning_issued = False
+
+    # Lists to store losses for plotting
+    train_losses_history = []
+    val_losses_history = []
+    train_forecast_losses_history = []
+    val_forecast_losses_history = []
 
     for epoch in range(args.epochs):
         model.train()
@@ -234,6 +280,12 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
         avg_val_forecast_loss = epoch_val_forecast_loss / num_val_batches if num_val_batches > 0 else float("inf")
         scheduler.step(avg_val_loss)
 
+        # Store losses for plotting
+        train_losses_history.append(avg_train_loss)
+        val_losses_history.append(avg_val_loss)
+        train_forecast_losses_history.append(avg_forecast_loss)
+        val_forecast_losses_history.append(avg_val_forecast_loss)
+
         train_loss_str = f"Train Loss: {avg_train_loss:.4f} (F: {avg_forecast_loss:.4f})"
         val_loss_str = f"Val Loss: {avg_val_loss:.4f} (F: {avg_val_forecast_loss:.4f})"
         print(f"Epoch [{epoch + 1}/{args.epochs}] {train_loss_str}, {val_loss_str}")
@@ -260,6 +312,19 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
             print(f"Model saved to {model_save_path} (Val Loss: {best_val_loss:.4f})")
 
     print("LSTM Training finished.")
+
+    # Call plotting function after training
+    plot_training_curves(
+        train_losses_history,
+        val_losses_history,
+        train_forecast_losses_history,
+        val_forecast_losses_history,
+        args.epochs,
+        args.model_type,
+        args.encoding_type,
+        args.num_blocks,
+        model_save_path.parent,  # Pass the directory where the model is saved
+    )
 
 
 def prepare_data_for_xgboost(dataset: PaTSDataset, context_window_size: int) -> Tuple[np.ndarray, np.ndarray]:

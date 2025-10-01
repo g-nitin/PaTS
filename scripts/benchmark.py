@@ -4,7 +4,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import torch
 from fastdtw import fastdtw  # type: ignore
 from scipy.spatial.distance import hamming
@@ -417,6 +419,242 @@ def load_problem_basenames_from_split_file(split_file_path: Path) -> List[str]:
     return basenames
 
 
+def plot_benchmark_summary(
+    aggregated_metrics: Dict[str, Any],
+    model_type: str,
+    encoding_type: str,
+    num_blocks: int,
+    output_dir: Path,
+):
+    """
+    Plots key aggregated benchmark metrics as a bar chart.
+    """
+    sns.set_theme()
+    metrics_to_plot = {
+        "Solved Rate (Strict)": aggregated_metrics.get("solved_rate_strict", 0.0),
+        "Valid Sequence Rate": aggregated_metrics.get("valid_sequence_rate", 0.0),
+        "Goal Achievement Rate": aggregated_metrics.get("goal_achievement_rate", 0.0),
+        "Avg Plan Length Ratio (Solved)": aggregated_metrics.get("avg_plan_length_ratio_for_solved", 0.0),
+        "Avg DTW Distance": aggregated_metrics.get("avg_dtw_distance", 0.0),
+        "Avg Hamming Distance": aggregated_metrics.get("avg_mean_per_step_hamming_dist", 0.0),
+    }
+
+    # Filter out metrics that are -1.0 (not computed or invalid)
+    metrics_to_plot = {k: v for k, v in metrics_to_plot.items() if v >= 0}
+
+    if not metrics_to_plot:
+        print("No valid aggregated metrics to plot.")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    bars = ax.bar(
+        metrics_to_plot.keys(), metrics_to_plot.values(), color=sns.color_palette("viridis", len(metrics_to_plot))
+    )
+    ax.set_ylabel("Value")
+    ax.set_title(f"Benchmark Summary for {model_type} (N={num_blocks}, Encoding={encoding_type})")
+    plt.xticks(rotation=45, ha="right")
+
+    # Adjust ylim for DTW/Hamming if they are present and large
+    max_val = max(metrics_to_plot.values()) if metrics_to_plot else 0.0
+    plt.ylim(0, max(1.1, max_val * 1.1))  # Ensure y-axis starts from 0 and accommodates max value
+
+    for bar in bars:
+        yval = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width() / 2, yval + 0.02, round(yval, 2), ha="center", va="bottom")
+
+    plt.tight_layout()
+    plot_filename = f"benchmark_summary_{model_type}_N{num_blocks}_{encoding_type}.png"
+    plt.savefig(output_dir / plot_filename)
+    plt.close()
+    print(f"Benchmark summary plot saved to {output_dir / plot_filename}")
+
+
+def plot_violation_distribution(
+    violation_counts: Dict[str, int],
+    model_type: str,
+    encoding_type: str,
+    num_blocks: int,
+    output_dir: Path,
+):
+    """
+    Plots the distribution of violation codes as a bar chart.
+    """
+    if not violation_counts:
+        print("No violation data to plot.")
+        return
+
+    sns.set_theme()
+    sorted_violations = sorted(violation_counts.items(), key=lambda item: item[1], reverse=True)
+    labels = [item[0] for item in sorted_violations]
+    counts = [item[1] for item in sorted_violations]
+
+    plt.figure(figsize=(12, 7))
+    bars = sns.barplot(x=labels, y=counts, palette="rocket")
+    plt.xlabel("Violation Code")
+    plt.ylabel("Count")
+    plt.title(f"Violation Distribution for {model_type} (N={num_blocks}, Encoding={encoding_type})")
+    plt.xticks(rotation=45, ha="right")
+
+    for bar in bars.patches:
+        bars.annotate(
+            f"{int(bar.get_height())}",
+            (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+            ha="center",
+            va="bottom",
+            xytext=(0, 5),
+            textcoords="offset points",
+        )
+
+    plt.tight_layout()
+    plot_filename = f"violation_distribution_{model_type}_N{num_blocks}_{encoding_type}.png"
+    plt.savefig(output_dir / plot_filename)
+    plt.close()
+    print(f"Violation distribution plot saved to {output_dir / plot_filename}")
+
+
+def plot_plan_length_histograms(
+    predicted_lengths: List[int],
+    expert_lengths: List[int],
+    model_type: str,
+    encoding_type: str,
+    num_blocks: int,
+    output_dir: Path,
+):
+    """
+    Plots histograms of predicted and expert plan lengths.
+    """
+    if not predicted_lengths and not expert_lengths:
+        print("No plan length data to plot.")
+        return
+
+    sns.set_theme()
+    plt.figure(figsize=(10, 6))
+
+    bins = (
+        range(min(predicted_lengths + expert_lengths), max(predicted_lengths + expert_lengths) + 2)
+        if predicted_lengths or expert_lengths
+        else range(1, 10)
+    )
+
+    if predicted_lengths:
+        sns.histplot(predicted_lengths, bins=bins, kde=True, color="skyblue", label="Predicted Plan Lengths", alpha=0.6)
+    if expert_lengths:
+        sns.histplot(expert_lengths, bins=bins, kde=True, color="orange", label="Expert Plan Lengths", alpha=0.6)
+
+    plt.xlabel("Plan Length")
+    plt.ylabel("Frequency")
+    plt.title(f"Plan Length Distribution for {model_type} (N={num_blocks}, Encoding={encoding_type})")
+    plt.legend()
+    plt.grid(axis="y", alpha=0.75)
+    plt.tight_layout()
+    plot_filename = f"plan_length_histograms_{model_type}_N{num_blocks}_{encoding_type}.png"
+    plt.savefig(output_dir / plot_filename)
+    plt.close()
+    print(f"Plan length histograms saved to {output_dir / plot_filename}")
+
+
+def plot_timeseries_metrics_histograms(
+    dtw_distances: List[float],
+    hamming_distances: List[float],
+    model_type: str,
+    encoding_type: str,
+    num_blocks: int,
+    output_dir: Path,
+):
+    """
+    Plots histograms for DTW and Hamming distances.
+    """
+    if not dtw_distances and not hamming_distances:
+        print("No time-series metrics data to plot.")
+        return
+
+    sns.set_theme()
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig.suptitle(f"Time-Series Metrics Distribution for {model_type} (N={num_blocks}, Encoding={encoding_type})")
+
+    if dtw_distances:
+        sns.histplot(dtw_distances, kde=True, color="green", ax=axes[0])
+        axes[0].set_title("DTW Distance")
+        axes[0].set_xlabel("Distance")
+        axes[0].set_ylabel("Frequency")
+        axes[0].grid(axis="y", alpha=0.75)
+
+    if hamming_distances:
+        sns.histplot(hamming_distances, kde=True, color="purple", ax=axes[1])
+        axes[1].set_title("Mean Per-Step Hamming Distance")
+        axes[1].set_xlabel("Distance")
+        axes[1].set_ylabel("Frequency")
+        axes[1].grid(axis="y", alpha=0.75)
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout to prevent suptitle overlap
+    plot_filename = f"timeseries_metrics_histograms_{model_type}_N{num_blocks}_{encoding_type}.png"
+    plt.savefig(output_dir / plot_filename)
+    plt.close()
+    print(f"Time-series metrics histograms saved to {output_dir / plot_filename}")
+
+
+def plot_trajectory_comparison(
+    predicted_plan: List[List[int]],
+    expert_plan: np.ndarray,
+    problem_basename: str,
+    encoding_type: str,
+    num_blocks: int,
+    output_dir: Path,
+):
+    """
+    Visualizes the predicted vs. expert trajectory.
+    For binary encoding, uses a heatmap. For SAS+, uses line plots.
+    """
+    sns.set_theme()
+    pred_np = np.array(predicted_plan)
+    expert_np = expert_plan
+
+    max_len = max(pred_np.shape[0], expert_np.shape[0])
+    num_features = pred_np.shape[1] if pred_np.shape[0] > 0 else expert_np.shape[1]
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 8), sharey=True)
+    fig.suptitle(f"Trajectory Comparison for {problem_basename} (N={num_blocks}, Encoding={encoding_type})", fontsize=16)
+
+    if encoding_type == "bin":
+        # Heatmap for binary encoding
+        sns.heatmap(pred_np.T, cmap="Greys", cbar=False, ax=axes[0], yticklabels=False)
+        axes[0].set_title("Predicted Trajectory (Binary)")
+        axes[0].set_xlabel("Time Step")
+        axes[0].set_ylabel("Feature Index")
+
+        sns.heatmap(expert_np.T, cmap="Greys", cbar=False, ax=axes[1], yticklabels=False)
+        axes[1].set_title("Expert Trajectory (Binary)")
+        axes[1].set_xlabel("Time Step")
+        axes[1].set_ylabel("Feature Index")  # This will be shared, but good to label
+
+    elif encoding_type == "sas":
+        # Line plot for SAS+ encoding
+        # Each line represents a block's position over time
+        for i in range(num_blocks):
+            axes[0].plot(pred_np[:, i], label=f"b{i + 1}")
+            axes[1].plot(expert_np[:, i], label=f"b{i + 1}")
+
+        axes[0].set_title("Predicted Trajectory (SAS+)")
+        axes[0].set_xlabel("Time Step")
+        axes[0].set_ylabel("Block Position Value")
+        axes[0].legend(loc="upper left", bbox_to_anchor=(1, 1))
+        axes[0].set_ylim(-1.5, num_blocks + 0.5)  # SAS+ values are -1, 0, 1..N
+
+        axes[1].set_title("Expert Trajectory (SAS+)")
+        axes[1].set_xlabel("Time Step")
+        axes[1].set_ylabel("Block Position Value")
+        axes[1].legend(loc="upper left", bbox_to_anchor=(1, 1))
+        axes[1].set_ylim(-1.5, num_blocks + 0.5)
+
+    plt.tight_layout(rect=[0, 0.03, 0.9, 0.95])  # Adjust for suptitle and legends
+    plot_filename = f"trajectory_comparison_{model_type}_N{num_blocks}_{encoding_type}_{problem_basename}.png"
+    plot_path = output_dir / "trajectory_plots" / plot_filename
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(plot_path)
+    plt.close()
+    # print(f"Trajectory comparison plot saved to {plot_path}") # Too verbose for every problem
+
+
 def compute_aggregated_metrics(
     results: List[ValidationResult], expert_plan_lengths: List[int], timeseries_metrics_list: List[Dict[str, float]]
 ) -> Dict[str, Any]:
@@ -620,6 +858,19 @@ def run_benchmark(args: argparse.Namespace):
     # The validator will check if goal is met within the *generated* plan.
     max_generation_steps = args.max_plan_length
 
+    all_validation_results: List[ValidationResult] = []
+    all_expert_plan_lengths: List[int] = []
+    all_timeseries_metrics: List[Dict[str, float]] = []
+
+    # New lists for plotting histograms
+    all_predicted_plan_lengths: List[int] = []
+    all_dtw_distances: List[float] = []
+    all_hamming_distances: List[float] = []
+
+    # Counter for detailed trajectory plots
+    solved_problems_plotted_count = 0
+    MAX_TRAJECTORY_PLOTS = 5  # Limit the number of individual trajectory plots
+
     for i, basename in enumerate(problem_basenames):
         print(f"  Processing problem {i + 1}/{len(problem_basenames)}: {basename} ...", end="", flush=True)
 
@@ -655,6 +906,25 @@ def run_benchmark(args: argparse.Namespace):
         ts_metrics = compute_timeseries_metrics(predicted_plan_list_of_lists, expert_trajectory_np, args.encoding_type)
         all_timeseries_metrics.append(ts_metrics)
 
+        all_predicted_plan_lengths.append(validation_res.predicted_plan_length)
+        if ts_metrics.get("dtw_distance", -1.0) >= 0:
+            all_dtw_distances.append(ts_metrics["dtw_distance"])
+        if ts_metrics.get("mean_per_step_hamming_dist", -1.0) >= 0:
+            all_hamming_distances.append(ts_metrics["mean_per_step_hamming_dist"])
+
+        # Plot individual trajectory comparison for solved problems
+        if args.save_detailed_results and validation_res.is_valid and validation_res.metrics.get("goal_achievement") == 1.0:
+            if solved_problems_plotted_count < MAX_TRAJECTORY_PLOTS:
+                plot_trajectory_comparison(
+                    predicted_plan_list_of_lists,
+                    expert_trajectory_np,
+                    basename,
+                    args.encoding_type,
+                    args.num_blocks,
+                    output_dir,
+                )
+                solved_problems_plotted_count += 1
+
         status = "VALID" if validation_res.is_valid else "INVALID"
         goal_reached = "GOAL" if validation_res.metrics.get("goal_achievement") == 1.0 else "NO_GOAL"
         print(
@@ -686,6 +956,40 @@ def run_benchmark(args: argparse.Namespace):
             aggregated_metrics["violation_code_counts"] = dict(aggregated_metrics["violation_code_counts"])
         json.dump(aggregated_metrics, f, indent=4)
     print(f"\nBenchmark results saved to: {results_filepath}")
+
+    # Generate plots for aggregated results
+    print("\nGenerating benchmark plots...")
+    plot_benchmark_summary(
+        aggregated_metrics,
+        model_type,
+        args.encoding_type,
+        num_blocks,
+        output_dir,
+    )
+    plot_violation_distribution(
+        aggregated_metrics["violation_code_counts"],  # This is already a dict
+        model_type,
+        args.encoding_type,
+        num_blocks,
+        output_dir,
+    )
+    plot_plan_length_histograms(
+        all_predicted_plan_lengths,
+        all_expert_plan_lengths,
+        model_type,
+        args.encoding_type,
+        num_blocks,
+        output_dir,
+    )
+    plot_timeseries_metrics_histograms(
+        all_dtw_distances,
+        all_hamming_distances,
+        model_type,
+        args.encoding_type,
+        num_blocks,
+        output_dir,
+    )
+    print("All benchmark plots generated.")
 
     # Optionally save detailed per-problem results
     if args.save_detailed_results:

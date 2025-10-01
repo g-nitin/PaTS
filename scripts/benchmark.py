@@ -594,6 +594,7 @@ def plot_timeseries_metrics_histograms(
 
 
 def plot_trajectory_comparison(
+    model_type: str,
     predicted_plan: List[List[int]],
     expert_plan: np.ndarray,
     problem_basename: str,
@@ -907,6 +908,7 @@ def run_benchmark(args: argparse.Namespace):
         if args.save_detailed_results and validation_res.is_valid and validation_res.metrics.get("goal_achievement") == 1.0:
             if solved_problems_plotted_count < MAX_TRAJECTORY_PLOTS:
                 plot_trajectory_comparison(
+                    model_type,
                     predicted_plan_list_of_lists,
                     expert_trajectory_np,
                     basename,

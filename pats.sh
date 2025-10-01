@@ -53,9 +53,8 @@ if [ "$model_type" = 'lstm' ]; then
         --model_type $model_type \
         --dataset_dir "$RAW_BLOCK_DIR" \
         --dataset_split_dir "${RAW_BLOCK_DIR}/splits" \
-        --processed_data_dir "$PROCESSED_BLOCK_ENCODING_DIR" \
         --num_blocks "$num_blocks" \
-        --output_dir "${output_base_dir}" \
+        --output_dir "$output_base_dir" \
         --encoding_type "$encoding" \
         --epochs 400 \
         --batch_size 32 \
@@ -89,7 +88,6 @@ elif [ "$model_type" = 'ttm' ]; then
     python -m scripts.train_model \
         --model_type $model_type \
         --dataset_dir "$RAW_BLOCK_DIR" \
-        --processed_data_dir "$PROCESSED_BLOCK_ENCODING_DIR" \
         --num_blocks "$num_blocks" \
         --encoding_type "$encoding" \
         --output_dir "${output_base_dir}" \
@@ -125,7 +123,6 @@ elif [ "$model_type" = 'xgboost' ]; then
     python -m scripts.train_model \
         --model_type $model_type \
         --dataset_dir "$RAW_BLOCK_DIR" \
-        --processed_data_dir "$PROCESSED_BLOCK_ENCODING_DIR" \
         --num_blocks "$num_blocks" \
         --encoding_type "$encoding" \
         --output_dir "${output_base_dir}" \

@@ -5,7 +5,7 @@ import re
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path, PosixPath
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -13,10 +13,9 @@ from loguru import logger
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import Dataset  # Used for type hinting, PaTSDataset will be the actual one
-from torch.utils.tensorboard.writer import SummaryWriter
 from transformers.modeling_utils import PreTrainedModel
 from transformers.trainer import Trainer
-from transformers.trainer_callback import EarlyStoppingCallback, TrainerCallback
+from transformers.trainer_callback import EarlyStoppingCallback
 from transformers.training_args import TrainingArguments
 from tsfm_public import TrackingCallback  # type: ignore
 from tsfm_public.toolkit.get_model import get_model  # type: ignore
@@ -74,28 +73,6 @@ class ModelConfig:
     state_dim: Optional[int] = None
     encoding_type: str = "bin"  # Specifies the encoding used (e.g., 'bin', 'sas')
     num_blocks: Optional[int] = None  # Number of blocks, relevant for SAS+ validation
-
-
-# Callback class for custom TensorBoard logging
-class TensorBoardLoggingCallback(TrainerCallback):
-    def __init__(self, tb_writer: SummaryWriter):
-        self.tb_writer = tb_writer
-
-    def on_log(self, args, state, control, model=None, logs=None, **kwargs):
-        """Called when logging occurs during training"""
-        if logs is not None and self.tb_writer is not None:
-            for key, value in logs.items():
-                if isinstance(value, (int, float)):
-                    # Log all numeric metrics
-                    self.tb_writer.add_scalar(f"training/{key}", value, state.global_step)
-
-    def on_evaluate(self, args, state, control, model=None, logs=None, **kwargs):
-        """Called after evaluation"""
-        if logs is not None and self.tb_writer is not None:
-            for key, value in logs.items():
-                if isinstance(value, (int, float)) and key.startswith("eval_"):
-                    # Log evaluation metrics
-                    self.tb_writer.add_scalar(f"evaluation/{key}", value, state.global_step)
 
 
 class TTMDataCollator:
@@ -225,7 +202,6 @@ class BlocksWorldTTM:
         self.model_name: str
         self.trainer: Trainer
         self.output_dir: PosixPath | Path = output_dir
-        self.tb_writer: Optional[SummaryWriter] = None
 
     def _ensure_config_consistency(self, train_dataset: PaTSDataset):
         """Ensures that the ModelConfig is consistent with the dataset."""
@@ -261,12 +237,6 @@ class BlocksWorldTTM:
         self.model_name = str(get_model(**get_model_params))  # Ensure it's string
         logger.info(f"Base TTM model key: {self.model_name}")
 
-        # Initialize TensorBoard writer
-        tensorboard_log_dir = self.output_dir / "tensorboard_logs"
-        tensorboard_log_dir.mkdir(parents=True, exist_ok=True)
-        self.tb_writer = SummaryWriter(log_dir=str(tensorboard_log_dir))
-        logger.info(f"TensorBoard logs will be saved to: {tensorboard_log_dir}")
-
         training_args = TrainingArguments(
             output_dir=posixpath.join(self.output_dir, "training_output"),
             learning_rate=self.config.learning_rate,
@@ -279,8 +249,6 @@ class BlocksWorldTTM:
             metric_for_best_model="eval_loss",
             greater_is_better=False,
             seed=self.config.seed,
-            report_to="tensorboard",  # Enable TensorBoard reporting
-            logging_dir=str(tensorboard_log_dir),  # Set logging directory
             logging_strategy="steps",
             logging_steps=10,  # Log every 10 steps
             dataloader_pin_memory=False,
@@ -291,7 +259,6 @@ class BlocksWorldTTM:
         callbacks = [
             TrackingCallback(),
             EarlyStoppingCallback(early_stopping_patience=5),
-            TensorBoardLoggingCallback(self.tb_writer),  # Custom callback for additional logging
         ]
 
         # Optimizer and scheduler
@@ -306,19 +273,6 @@ class BlocksWorldTTM:
             max_lr=self.config.learning_rate,
             epochs=self.config.num_epochs,
             steps_per_epoch=steps_per_epoch,
-        )
-
-        # Log hyperparameters to TensorBoard
-        self.tb_writer.add_hparams(
-            {
-                "learning_rate": self.config.learning_rate,
-                "batch_size": self.config.batch_size,
-                "num_epochs": self.config.num_epochs,
-                "context_length": self.config.context_length,
-                "prediction_length": self.config.prediction_length,
-                "state_dim": self.config.state_dim,
-            },
-            {},
         )
 
         # Instantiate the data collator
@@ -342,10 +296,6 @@ class BlocksWorldTTM:
         logger.info("Trainer initialized. Starting training...")
         self.trainer.train()
         logger.info("Training finished.")
-
-        # Close TensorBoard writer
-        if self.tb_writer:
-            self.tb_writer.close()
 
     def predict(self, context_sequence: torch.Tensor, goal_states: torch.Tensor) -> torch.Tensor:
         """
@@ -608,56 +558,3 @@ def get_num_blocks_from_filename(filename_base: str) -> Optional[int]:
     if match:
         return int(match.group(1))
     return None
-
-
-def prepare_datasets(
-    dataset_dir: Path, dataset_split_dir: Path, num_blocks: int, context_length: int, prediction_length: int, seed: int
-) -> Tuple[Dataset, Dataset, Dataset, int, int]:
-    logger.info("Preparing train/validation/test datasets...")
-
-    train_basenames_all = load_problem_basenames_from_split_file(dataset_split_dir / "train_files.txt")
-    val_basenames_all = load_problem_basenames_from_split_file(dataset_split_dir / "val_files.txt")
-    # Test dataset is not strictly needed for training, but can be prepared for completeness
-    # test_basenames_all = load_problem_basenames_from_split_file(dataset_split_dir / "test_files.txt")
-
-    # Filter basenames for the target num_blocks (important if split files are mixed)
-    # Assuming dataset_dir is already blocks_<N> specific, this might be redundant but safe.
-    train_basenames = [bn for bn in train_basenames_all if get_num_blocks_from_filename(bn) == num_blocks]
-    val_basenames = [bn for bn in val_basenames_all if get_num_blocks_from_filename(bn) == num_blocks]
-    # test_basenames = [bn for bn in test_basenames_all if get_num_blocks_from_filename(bn) == num_blocks] # Test not strictly needed for training
-
-    if not train_basenames:
-        raise ValueError(
-            f"No training problem basenames found for N={num_blocks} in {dataset_split_dir / 'train_files.txt'}"
-        )
-
-    logger.info(f"Found {len(train_basenames)} train, {len(val_basenames)} val basenames for N={num_blocks}.")
-
-    # Create dataset instances
-    # PaTSDataset will infer state_dim from the data.
-    # dataset_dir is e.g. data/blocks_4, split_file_name is e.g. "train_files.txt"
-    train_dataset_instance = PaTSDataset(dataset_dir=dataset_dir, split_file_name="train_files.txt")
-    state_dim = train_dataset_instance.state_dim
-    val_dataset_instance = PaTSDataset(dataset_dir=dataset_dir, split_file_name="val_files.txt")
-    test_dataset_instance = PaTSDataset(dataset_dir=dataset_dir, split_file_name="test_files.txt")
-
-    # Get max_plan_len_in_train_data using PaTSDataset structure
-    max_plan_len_in_train_data = 0
-    if len(train_dataset_instance.basenames) > 0:
-        for basename_for_len_check in train_dataset_instance.basenames:
-            traj_file_path_for_len = train_dataset_instance.trajectories_bin_dir / f"{basename_for_len_check}.traj.bin.npy"
-            if traj_file_path_for_len.exists():
-                try:
-                    traj_np = np.load(traj_file_path_for_len)
-                    if traj_np.ndim == 2:
-                        max_plan_len_in_train_data = max(max_plan_len_in_train_data, traj_np.shape[0])
-                except Exception as e:
-                    logger.warning(f"Could not load trajectory {traj_file_path_for_len} to determine max length: {e}")
-            else:
-                logger.warning(f"Trajectory file {traj_file_path_for_len} not found during max length check.")
-
-    logger.info(
-        f"Dataset preparation complete. state_dim: {state_dim}, max_plan_len_in_train_data: {max_plan_len_in_train_data}"
-    )
-
-    return train_dataset_instance, val_dataset_instance, test_dataset_instance, state_dim, max_plan_len_in_train_data

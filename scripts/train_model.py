@@ -101,7 +101,7 @@ def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, m
     :return: None
     """
 
-    print("Starting LSTM training...")
+    print("\nStarting LSTM training...")
 
     # Select Loss Function based on Encoding
     if args.encoding_type == "sas":
@@ -365,7 +365,7 @@ def prepare_data_for_xgboost(dataset: PaTSDataset, context_window_size: int) -> 
 
 
 def main():
-    print("Starting unified training script for PaTS models...")
+    print("\nStarting unified training script for PaTS models...")
     parser = argparse.ArgumentParser(description="Unified Training Script for PaTS Models")
 
     # Common arguments (agnostic to `model_type`)
@@ -501,6 +501,7 @@ def main():
 
     print("Parsed Arguments:")
     pprint(vars(args))
+    print()
 
     # lstm_param_names = [
     #     args.lstm_hidden_size,

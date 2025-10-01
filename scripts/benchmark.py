@@ -756,7 +756,7 @@ def compute_aggregated_metrics(
 # ** Main Benchmarking Logic **
 def run_benchmark(args: argparse.Namespace):
     raw_block_dir = Path(args.dataset_dir)
-    processed_block_encoding_dir = Path(args.processed_data_dir)
+    processed_block_encoding_dir = Path(args.processed_block_encoding_dir)
     num_blocks = args.num_blocks
     model_type = args.model_type
     model_path = Path(args.model_path)

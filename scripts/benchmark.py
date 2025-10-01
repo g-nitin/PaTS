@@ -756,21 +756,12 @@ def compute_aggregated_metrics(
 # ** Main Benchmarking Logic **
 def run_benchmark(args: argparse.Namespace):
     raw_block_dir = Path(args.dataset_dir)
+    processed_block_encoding_dir = Path(args.processed_data_dir)
     num_blocks = args.num_blocks
     model_type = args.model_type
     model_path = Path(args.model_path)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Construct the PROCESSED_BLOCK_ENCODING_DIR
-    # This assumes a structure like data/raw_problems/blocksworld/N4 and data/processed_trajectories/blocksworld/N4/bin
-    processed_block_encoding_dir = (
-        raw_block_dir.parent.parent
-        / "processed_trajectories"
-        / raw_block_dir.parent.name
-        / raw_block_dir.name
-        / args.encoding_type
-    )
 
     # Construct paths based on num_blocks
     if not raw_block_dir.exists():
@@ -1026,7 +1017,18 @@ if __name__ == "__main__":
         required=True,
         help="Path to the raw problem data directory for a specific N (e.g., 'data/raw_problems/blocksworld/N4')",
     )
-    parser.add_argument("--num_blocks", type=int, required=True, help="Number of blocks for the problems to benchmark.")
+    parser.add_argument(
+        "--processed_block_encoding_dir",
+        type=Path,
+        required=True,
+        help="Path to the processed block encoding directory (e.g., 'data/processed_trajectories/blocksworld/N4/bin')",
+    )
+    parser.add_argument(
+        "--num_blocks",
+        type=int,
+        required=True,
+        help="Number of blocks for the problems to benchmark.",
+    )
     parser.add_argument(
         "--model_type",
         type=str,
@@ -1035,7 +1037,10 @@ if __name__ == "__main__":
         help="Type of model to benchmark.",
     )
     parser.add_argument(
-        "--model_path", type=str, required=True, help="Path to the trained model directory (TTM) or .pth file (LSTM)."
+        "--model_path",
+        type=str,
+        required=True,
+        help="Path to the trained model directory (TTM) or .pth file (LSTM).",
     )
     parser.add_argument(
         "--encoding_type",
@@ -1045,7 +1050,10 @@ if __name__ == "__main__":
         help="The encoding type of the dataset to benchmark against.",
     )
     parser.add_argument(
-        "--output_dir", type=str, default="./benchmark_outputs", help="Directory to save benchmark results."
+        "--output_dir",
+        type=str,
+        default="./benchmark_outputs",
+        help="Directory to save benchmark results.",
     )
     parser.add_argument("--max_plan_length", type=int, default=50, help="Maximum plan length for model generation.")
     parser.add_argument("--save_detailed_results", action="store_true", help="Save detailed results for each problem.")

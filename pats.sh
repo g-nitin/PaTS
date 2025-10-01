@@ -70,6 +70,7 @@ if [ "$model_type" = 'lstm' ]; then
 
     python -m scripts.benchmark \
         --dataset_dir "$RAW_BLOCK_DIR" \
+        --processed_block_encoding_dir "$PROCESSED_BLOCK_ENCODING_DIR" \
         --num_blocks "$num_blocks" \
         --model_type "$model_type" \
         --model_path "$model_path" \
@@ -105,6 +106,7 @@ elif [ "$model_type" = 'ttm' ]; then
     
     python -m scripts.benchmark \
         --dataset_dir "$RAW_BLOCK_DIR" \
+        --processed_block_encoding_dir "$PROCESSED_BLOCK_ENCODING_DIR" \
         --num_blocks "$num_blocks" \
         --model_type "$model_type" \
         --model_path "$model_path" \
@@ -140,6 +142,7 @@ elif [ "$model_type" = 'xgboost' ]; then
 
     python -m scripts.benchmark \
         --dataset_dir "$RAW_BLOCK_DIR" \
+        --processed_block_encoding_dir "$PROCESSED_BLOCK_ENCODING_DIR" \
         --num_blocks "$num_blocks" \
         --model_type "$model_type" \
         --model_path "$model_path" \
@@ -169,6 +172,7 @@ elif [ "$model_type" = 'llama' ]; then
     # --llama_use_few_shot is NOT present for zero-shot
     python -m scripts.benchmark \
         --dataset_dir "$RAW_BLOCK_DIR" \
+        --processed_block_encoding_dir "$PROCESSED_BLOCK_ENCODING_DIR" \
         --num_blocks "$num_blocks" \
         --model_type "$model_type" \
         --model_path "$model_path" \
@@ -191,6 +195,7 @@ elif [ "$model_type" = 'llama' ]; then
 
     python -m scripts.benchmark \
         --dataset_dir "$RAW_BLOCK_DIR" \
+        --processed_block_encoding_dir "$PROCESSED_BLOCK_ENCODING_DIR" \
         --num_blocks "$num_blocks" \
         --model_type "$model_type" \
         --model_path "$model_path" \

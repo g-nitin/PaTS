@@ -430,6 +430,7 @@ def main():
 
         traj_output_path.parent.mkdir(parents=True, exist_ok=True)  # Ensure processed_trajectories dir exists
         np.save(goal_output_path, goal_vector_np)
+        np.save(traj_output_path, trajectory_np)
 
         traj_len = trajectory_np.shape[0] if trajectory_np.ndim > 0 and trajectory_np.size > 0 else 0
         vec_dim = trajectory_np.shape[1] if trajectory_np.ndim > 1 and traj_len > 0 else encoding_info["feature_dim"]

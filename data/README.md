@@ -14,7 +14,7 @@ The dataset is generated using the `data/generate_dataset.sh` script. This scrip
 
 ### Data Structure and Format
 
-The dataset is now organized into two main sections: `data/raw_problems` for encoding-agnostic problem definitions and `data/processed_trajectories` for encoding-specific state trajectories.
+The dataset is organized into two main sections: `data/raw_problems` for encoding-agnostic problem definitions and `data/processed_trajectories` for encoding-specific state trajectories.
 
 #### `data/raw_problems/<domain_name>/N<num_blocks>/`
 

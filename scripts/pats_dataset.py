@@ -12,14 +12,18 @@ class PaTSDataset(Dataset):
     """
 
     def __init__(
-        self, raw_data_dir: str | Path, processed_data_dir: str | Path, split_file_name: str, encoding_type: str = "bin"
+        self,
+        raw_data_dir: str | Path,
+        processed_data_dir: str | Path,
+        split_file_name: str,
+        encoding_type: str = "bin",
     ):
         """
         Initializes the PaTSDataset.
 
         :param raw_data_dir: The root directory for raw problem data for a specific N (e.g., 'data/raw_problems/blocksworld/N4/'). This is where split files (train_files.txt) and encoding_info.json are located.
         :param processed_data_dir: The root directory for processed, encoded trajectories for a specific N and encoding (e.g., 'data/processed_trajectories/blocksworld/N4/bin/').
-        :param split_file_name: The name of the file containing problem basenames for this split (e.g., 'train_files.txt').
+        :param split_file_name: The name of the file containing problem basenames for this split (e.g., 'train_files.txt' or 'val_files.txt').
         :param encoding_type: The encoding of the data to load ('bin' or 'sas').
         """
         self.raw_data_dir = Path(raw_data_dir)

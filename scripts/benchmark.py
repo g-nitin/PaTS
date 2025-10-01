@@ -120,10 +120,6 @@ class LSTMWrapper(PlannableModel):
         hidden_size = checkpoint.get("hidden_size")
         num_lstm_layers = checkpoint.get("num_lstm_layers")
         dropout_prob = checkpoint.get("dropout_prob", 0.2)
-
-        # Check if the model was trained with the MLM task
-        was_trained_with_mlm = checkpoint.get("use_mlm_task", False)
-
         encoding_type = checkpoint.get("encoding_type", "bin")  # Default to 'bin' if not found
         num_blocks = checkpoint.get("target_num_blocks")
         embedding_dim = checkpoint.get("embedding_dim")
@@ -140,7 +136,6 @@ class LSTMWrapper(PlannableModel):
             hidden_size=hidden_size,
             num_lstm_layers=num_lstm_layers,
             dropout_prob=dropout_prob,
-            use_mlm_task=was_trained_with_mlm,
             encoding_type=encoding_type,
             num_blocks=num_blocks,
             embedding_dim=embedding_dim,
@@ -349,7 +344,8 @@ def compute_timeseries_metrics(
             num_features = predicted_plan_np.shape[1]
 
             # Define a lambda to wrap the hamming distance and scale it
-            hamming_dist_raw = lambda u, v: hamming(u, v) * num_features
+            def hamming_dist_raw(u, v):
+                return hamming(u, v) * num_features
 
             # The fastdtw function is the robust way to do this.
             dtw_dist, path = fastdtw(predicted_plan_np, expert_plan, dist=hamming_dist_raw)

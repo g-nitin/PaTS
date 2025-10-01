@@ -14,7 +14,6 @@ class PaTS_LSTM(nn.Module):
         hidden_size,
         num_lstm_layers,
         dropout_prob=0.2,
-        use_mlm_task=False,
         encoding_type="binary",
         num_blocks=None,
         embedding_dim=32,
@@ -30,8 +29,6 @@ class PaTS_LSTM(nn.Module):
         :type num_lstm_layers: int
         :param dropout_prob: Dropout probability.
         :type dropout_prob: float
-        :param use_mlm_task: If True, adds an auxiliary MLM head.
-        :type use_mlm_task: bool
         :param encoding_type: The encoding type of the data ('bin' or 'sas').
         :type encoding_type: str
         :param num_blocks: The number of blocks in the SAS+ encoding (required if encoding_type is 'sas').
@@ -43,7 +40,6 @@ class PaTS_LSTM(nn.Module):
         self.num_features = num_features
         self.hidden_size = hidden_size
         self.num_lstm_layers = num_lstm_layers
-        self.use_mlm_task = use_mlm_task
         self.encoding_type = encoding_type
         self.num_blocks = num_blocks
         self.embedding_dim = embedding_dim
@@ -67,8 +63,6 @@ class PaTS_LSTM(nn.Module):
         else:  # Binary encoding
             lstm_input_size = 2 * num_features
             self.forecasting_head = nn.Linear(hidden_size, num_features)
-            if use_mlm_task:
-                self.mlm_head = nn.Linear(hidden_size, num_features)
             print("INFO: PaTS_LSTM (binary) initialized.")
 
         self.lstm = nn.LSTM(
@@ -145,13 +139,11 @@ class PaTS_LSTM(nn.Module):
 
         # Head logic
         forecasting_logits = self.forecasting_head(lstm_out)
-        mlm_logits = None  # MLM not supported for SAS+ here
-
         if self.encoding_type == "sas":
             # Reshape logits to (B, S_max, num_blocks, num_locations) for CrossEntropyLoss
             forecasting_logits = forecasting_logits.view(batch_size, max_seq_len, self.num_blocks, self.num_locations)
 
-        return forecasting_logits, mlm_logits, (h_n, c_n)
+        return forecasting_logits, (h_n, c_n)
 
     def predict_step(self, current_state_S_t, goal_state_S_G, h_prev, c_prev):
         """
@@ -209,10 +201,26 @@ class PaTS_LSTM(nn.Module):
             return next_state_binary, next_state_probs, h_next, c_next
 
 
-def lstm_collate_fn(batch, mlm_mask_prob=0.15):
+def lstm_collate_fn(batch):
     """
-    Custom collate function for LSTM training.
-    Handles padding and prepares data for the MLM auxiliary task.
+    Custom collate function for LSTM training. Handles padding.
+    The collate function is used in DataLoader to merge a list of samples to form a mini-batch of Tensor(s).
+    It is needed because each sample may have different lengths, and we need to pad them to the same length for batch processing.
+
+    :param batch: A list of samples from the dataset. Each sample is a dict with keys:
+        - 'initial_state': np.float32 array of shape (state_dim,)
+        - 'goal_state': np.float32 array of shape (state_dim,)
+        - 'expert_trajectory': np.float32 array of shape (L, state_dim)
+        - 'id': str
+    :type batch: List[Dict[str, Any]]
+    :returns: A dict with the following keys:
+        - 'input_sequences': Padded input sequences (B, S_max, F)
+        - 'goal_states': Goal states (B, F)
+        - 'target_sequences': Padded target sequences (B, S_max, F)
+        - 'lengths': Original sequence lengths (B,)
+        - 'ids': List of problem IDs (B,)
+        - 'expert_trajectories': List of original expert trajectories as tensors (not padded) (B,)
+    :rtype: Dict[str, Any]
     """
     # Filter out None items that might result from __getitem__ errors
     batch = [item for item in batch if item is not None]
@@ -248,17 +256,6 @@ def lstm_collate_fn(batch, mlm_mask_prob=0.15):
     padded_target_seqs = pad_sequence(target_seqs_list, batch_first=True, padding_value=0.0)
     goal_states_batch = torch.stack(goal_states_list)
 
-    # Create MLM Predicate Mask
-    # This mask indicates which elements of the *input* sequence should be predicted by the MLM head.
-    mlm_predicate_mask = torch.zeros_like(padded_input_seqs, dtype=torch.float32)
-    if mlm_mask_prob > 0:
-        for i in range(padded_input_seqs.shape[0]):
-            seq_len = int(lengths[i])
-            if seq_len > 0:
-                prob_matrix = torch.full((seq_len, padded_input_seqs.shape[2]), mlm_mask_prob)
-                masked_indices = torch.bernoulli(prob_matrix).bool()
-                mlm_predicate_mask[i, :seq_len, :] = masked_indices.float()
-
     return {
         "input_sequences": padded_input_seqs,
         "goal_states": goal_states_batch,
@@ -266,5 +263,4 @@ def lstm_collate_fn(batch, mlm_mask_prob=0.15):
         "lengths": lengths,
         "ids": ids_list,
         "expert_trajectories": expert_trajectories_orig_list,
-        "mlm_predicate_mask": mlm_predicate_mask,  # Add to batch dict
     }

@@ -2,7 +2,6 @@ import argparse
 import sys
 import warnings
 from datetime import datetime
-from functools import partial
 from pathlib import Path
 from pprint import pprint
 from typing import Tuple
@@ -14,7 +13,6 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from transformers.trainer_utils import set_seed as ttm_set_seed
 
-from scripts.BlocksWorldValidator import BlocksWorldValidator
 from scripts.models.lstm import PaTS_LSTM, lstm_collate_fn
 from scripts.models.ttm import BlocksWorldTTM, determine_ttm_model
 from scripts.models.ttm import ModelConfig as TTMModelConfig
@@ -25,7 +23,44 @@ from scripts.pats_dataset import PaTSDataset
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 
 
-def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_features, model_save_path):
+def train_lstm_model_loop(model, train_loader, val_loader, args, num_features, model_save_path):
+    """
+    Train the provided LSTM-based PaTS model over multiple epochs.
+    This function runs a full training loop over the given `train_loader`, evaluates on `val_loader` each epoch,
+    and saves the best model (by validation loss) to `model_save_path`.
+    It supports two encoding modes:
+        - "sas" (SAS+): forecasting is performed as a multi-class classification over locations for each block. CrossEntropyLoss is used and MLM / constraint losses are disabled.
+        - "bin": forecasting is performed as independent binary predictions per block-location via BCEWithLogitsLoss. Similar to One-hot encoding. Optional MLM and constraint violation losses may be included.
+    Uses AdamW optimizer and ReduceLROnPlateau scheduler (monitoring validation loss).
+
+    - For binary encoding:
+        - Forecasting loss is computed per-element using BCEWithLogitsLoss with reduction="none" and then averaged over only the valid (un-padded) forecast elements.
+        - MLM loss (if args.use_mlm_task) is computed similarly by masking to the mlm_predicate_mask and averaged over masked elements.
+        - Forecasting logits and targets are expected to have shape (B, S_max, N_blocks) (logits are raw, targets are 0/1 floats or ints). mlm_logits and mlm_predicate_mask (if used) should align in shape with input_seqs (B, S_max, N_blocks).
+    - For SAS+ encoding:
+        - Forecasting logits are expected to have shape (B, S_max, N_blocks, N_locs) and targets shape
+            (B, S_max, N_blocks) containing integer class labels. Targets are mapped to class indices via model._map_sas_to_indices before applying CrossEntropyLoss.
+
+    - Saves a checkpoint dict containing model/optimizer state_dict, training hyperparameters and metadata whenever a new best validation loss is observed.
+
+    :param model: The PaTS LSTM model to train. Must implement forward(input_seqs, goal_states, lengths) and return a tuple (forecasting_logits, mlm_logits, ...).
+        For SAS+ encoding, model must provide model.num_locations and method model._map_sas_to_indices(target_tensor) that maps SAS+ targets to class indices.
+    :param train_loader: DataLoader or iterable yielding batches as dictionaries with keys:
+        - "input_sequences": tensor, shape (B, S_max, N_blocks) (int for SAS+, float/binary for binary)
+        - "goal_states": tensor, shape compatible with model (commonly (B, N_blocks) or (B, S_max, N_blocks))
+        - "target_sequences": tensor, shape (B, S_max, N_blocks)
+    :param val_loader: Validation DataLoader/iterable with the same batch dictionary format as train_loader. If None, validation is skipped (but scheduler.step will still be called with inf).
+    :param args: Configuration with fields (used fields):
+        - encoding_type: "sas" or "binary"
+        - num_blocks: int (used for SAS+ clamping / metadata)
+        - epochs: int
+        - learning_rate: float
+        - lstm_hidden_size, lstm_num_layers, lstm_dropout_prob, lstm_embedding_dim: training metadata saved in checkpoint
+    :param num_features: Number of input features (saved in the checkpoint metadata).
+    :param model_save_path: File path where the best model checkpoint dict will be saved via torch.save when validation loss improves.
+    :return: None
+    """
+
     print("Starting LSTM training...")
 
     # Select Loss Function based on Encoding
@@ -46,7 +81,7 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
 
     for epoch in range(args.epochs):
         model.train()
-        epoch_train_loss, epoch_forecast_loss, epoch_mlm_loss, epoch_constraint_loss = 0.0, 0.0, 0.0, 0.0
+        epoch_train_loss, epoch_forecast_loss = 0.0, 0.0
         num_train_batches = 0
 
         for batch_data in train_loader:
@@ -56,8 +91,6 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
             goal_states = batch_data["goal_states"].to(DEVICE)
             target_seqs = batch_data["target_sequences"].to(DEVICE)
             lengths = batch_data["lengths"]
-            # MLM mask is only relevant for binary encoding
-            mlm_predicate_mask = batch_data.get("mlm_predicate_mask", torch.tensor([])).to(DEVICE)
 
             # Safeguard for SAS+ encoding to prevent out-of-bounds embedding errors.
             if args.encoding_type == "sas":
@@ -74,8 +107,7 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
                 goal_states.clamp_(min=0, max=max_val)
 
             optimizer.zero_grad()
-            # For SAS+, mlm_logits will be None
-            forecasting_logits, mlm_logits, _ = model(input_seqs, goal_states, lengths)
+            forecasting_logits, _ = model(input_seqs, goal_states, lengths)
 
             # Modified Loss Calculation
             if args.encoding_type == "sas":
@@ -104,34 +136,24 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
                     active_logits.reshape(-1, model.num_locations), active_targets_indices.reshape(-1)
                 )
             else:  # Binary encoding loss calculation
+                # Create a mask for valid forecasting steps
+                # (B, S_max, N_blocks, N_locs)
                 forecasting_mask = torch.zeros_like(target_seqs, dtype=torch.bool).to(DEVICE)
                 for i, length_val in enumerate(lengths):
                     if length_val > 0:
-                        forecasting_mask[i, :length_val, :] = True
+                        forecasting_mask[i, :length_val, :] = True  # Mark valid steps
 
+                # Count the number of valid forecasting elements
                 num_forecast_elements = forecasting_mask.float().sum()
                 if num_forecast_elements == 0:
                     continue
 
+                # Compute the loss
                 loss_forecasting_unreduced = criterion(forecasting_logits, target_seqs)
                 loss_forecasting = (loss_forecasting_unreduced * forecasting_mask.float()).sum() / num_forecast_elements
 
-            # For SAS+, MLM and Constraint losses are not used. They will be zero.
-            loss_mlm = torch.tensor(0.0).to(DEVICE)
-            if args.encoding_type != "sas" and args.use_mlm_task and mlm_logits is not None:
-                num_masked_elements = mlm_predicate_mask.sum()
-                if num_masked_elements > 0:
-                    loss_mlm_unreduced = criterion(mlm_logits, input_seqs)
-                    loss_mlm = (loss_mlm_unreduced * mlm_predicate_mask).sum() / num_masked_elements
-
-            loss_constraint = torch.tensor(0.0).to(DEVICE)
-            if args.encoding_type != "sas" and args.use_constraint_loss and validator is not None:
-                masked_logits = forecasting_logits[forecasting_mask[:, :, 0]]  # type: ignore
-                if masked_logits.ndim == 2 and masked_logits.shape[0] > 0:
-                    loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
-
             # Total Loss
-            total_loss = loss_forecasting + args.mlm_loss_weight * loss_mlm + args.constraint_loss_weight * loss_constraint
+            total_loss = loss_forecasting
             total_loss.backward()
             if args.clip_grad_norm is not None and args.clip_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
@@ -139,36 +161,35 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
 
             epoch_train_loss += total_loss.item()
             epoch_forecast_loss += loss_forecasting.item()
-            epoch_mlm_loss += loss_mlm.item()
-            epoch_constraint_loss += loss_constraint.item()
             num_train_batches += 1
 
         avg_train_loss = epoch_train_loss / num_train_batches if num_train_batches > 0 else float("inf")
         avg_forecast_loss = epoch_forecast_loss / num_train_batches if num_train_batches > 0 else float("inf")
-        avg_mlm_loss = epoch_mlm_loss / num_train_batches if num_train_batches > 0 else float("inf")
-        avg_constraint_loss = epoch_constraint_loss / num_train_batches if num_train_batches > 0 else float("inf")
 
         # Validation
         model.eval()
-        epoch_val_loss, epoch_val_forecast_loss, epoch_val_mlm_loss, epoch_val_constraint_loss = 0.0, 0.0, 0.0, 0.0
+        epoch_val_loss, epoch_val_forecast_loss = 0.0, 0.0
         num_val_batches = 0
+
         with torch.no_grad():
             if val_loader is not None:
                 for batch_data in val_loader:
                     if batch_data is None:
                         continue
+
                     input_seqs = batch_data["input_sequences"].to(DEVICE)
                     goal_states = batch_data["goal_states"].to(DEVICE)
                     target_seqs = batch_data["target_sequences"].to(DEVICE)
                     lengths = batch_data["lengths"]
-                    mlm_predicate_mask = batch_data.get("mlm_predicate_mask", torch.tensor([])).to(DEVICE)
 
                     if args.encoding_type == "sas":
                         input_seqs.clamp_(min=0, max=args.num_blocks)
                         goal_states.clamp_(min=0, max=args.num_blocks)
 
-                    forecasting_logits, mlm_logits, _ = model(input_seqs, goal_states, lengths)
+                    forecasting_logits, _ = model(input_seqs, goal_states, lengths)
 
+                    # Create a mask for valid forecasting steps
+                    # (B, S_max, N_blocks, N_locs)
                     if args.encoding_type == "sas":
                         mask = (
                             torch.arange(max(lengths), device=DEVICE)[None, :]
@@ -180,55 +201,44 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
                         if active_targets.numel() == 0:
                             continue
 
+                        # Map active targets to their indices
                         active_targets_indices = model._map_sas_to_indices(active_targets)
                         loss_forecasting = criterion(
                             active_logits.reshape(-1, model.num_locations), active_targets_indices.reshape(-1)
                         )
+
                     else:  # Binary
+                        # (B, S_max, N_blocks, N_locs)
                         forecasting_mask = torch.zeros_like(target_seqs, dtype=torch.bool).to(DEVICE)
                         for i, length_val in enumerate(lengths):
                             if length_val > 0:
                                 forecasting_mask[i, :length_val, :] = True
+
+                        # Count the number of valid forecasting elements
                         num_forecast_elements = forecasting_mask.float().sum()
                         if num_forecast_elements == 0:
                             continue
+
+                        # Compute the loss for the valid forecasting elements
                         loss_forecasting_unreduced = criterion(forecasting_logits, target_seqs)
                         loss_forecasting = (
                             loss_forecasting_unreduced * forecasting_mask.float()
                         ).sum() / num_forecast_elements
 
-                    loss_mlm = torch.tensor(0.0).to(DEVICE)
-                    if args.encoding_type != "sas" and args.use_mlm_task and mlm_logits is not None:
-                        num_masked_elements = mlm_predicate_mask.sum()
-                        if num_masked_elements > 0:
-                            loss_mlm_unreduced = criterion(mlm_logits, input_seqs)
-                            loss_mlm = (loss_mlm_unreduced * mlm_predicate_mask).sum() / num_masked_elements
-
-                    loss_constraint = torch.tensor(0.0).to(DEVICE)
-                    if args.encoding_type != "sas" and args.use_constraint_loss and validator is not None:
-                        masked_logits = forecasting_logits[forecasting_mask[:, :, 0]]  # type: ignore
-                        if masked_logits.ndim == 2 and masked_logits.shape[0] > 0:
-                            loss_constraint = validator.calculate_constraint_violation_loss(masked_logits)
-
-                    total_loss = (
-                        loss_forecasting + args.mlm_loss_weight * loss_mlm + args.constraint_loss_weight * loss_constraint
-                    )
+                    total_loss = loss_forecasting
                     epoch_val_loss += total_loss.item()
                     epoch_val_forecast_loss += loss_forecasting.item()
-                    epoch_val_mlm_loss += loss_mlm.item()
-                    epoch_val_constraint_loss += loss_constraint.item()
                     num_val_batches += 1
 
         avg_val_loss = epoch_val_loss / num_val_batches if num_val_batches > 0 else float("inf")
         avg_val_forecast_loss = epoch_val_forecast_loss / num_val_batches if num_val_batches > 0 else float("inf")
-        avg_val_mlm_loss = epoch_val_mlm_loss / num_val_batches if num_val_batches > 0 else float("inf")
-        avg_val_constraint_loss = epoch_val_constraint_loss / num_val_batches if num_val_batches > 0 else float("inf")
         scheduler.step(avg_val_loss)
 
-        train_loss_str = f"Train Loss: {avg_train_loss:.4f} (F: {avg_forecast_loss:.4f}, M: {avg_mlm_loss:.4f}, C: {avg_constraint_loss:.4f})"
-        val_loss_str = f"Val Loss: {avg_val_loss:.4f} (F: {avg_val_forecast_loss:.4f}, M: {avg_val_mlm_loss:.4f}, C: {avg_val_constraint_loss:.4f})"
+        train_loss_str = f"Train Loss: {avg_train_loss:.4f} (F: {avg_forecast_loss:.4f})"
+        val_loss_str = f"Val Loss: {avg_val_loss:.4f} (F: {avg_val_forecast_loss:.4f})"
         print(f"Epoch [{epoch + 1}/{args.epochs}] {train_loss_str}, {val_loss_str}")
 
+        # Save best model
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             torch.save(
@@ -242,14 +252,13 @@ def train_lstm_model_loop(model, train_loader, val_loader, validator, args, num_
                     "hidden_size": args.lstm_hidden_size,
                     "num_lstm_layers": args.lstm_num_layers,
                     "dropout_prob": args.lstm_dropout_prob,
-                    "use_mlm_task": args.use_mlm_task,
-                    "mlm_loss_weight": args.mlm_loss_weight,
                     "target_num_blocks": args.num_blocks,
                     "embedding_dim": args.lstm_embedding_dim if args.encoding_type == "sas" else None,
                 },
                 model_save_path,
             )
             print(f"Model saved to {model_save_path} (Val Loss: {best_val_loss:.4f})")
+
     print("LSTM Training finished.")
 
 
@@ -269,7 +278,7 @@ def prepare_data_for_xgboost(dataset: PaTSDataset, context_window_size: int) -> 
 
         # Create (S_{t-k+1}, ..., S_t, S_G) -> S_{t+1} pairs
         for t in range(len(trajectory) - 1):  # Iterate from S_0 to S_{L-2} to predict S_1 to S_{L-1}
-            current_state = trajectory[t]
+            # current_state = trajectory[t]
             next_state = trajectory[t + 1]
 
             # Build the context window for S_t
@@ -292,12 +301,15 @@ def prepare_data_for_xgboost(dataset: PaTSDataset, context_window_size: int) -> 
 
 def main():
     print("Starting unified training script for PaTS models...")
-
     parser = argparse.ArgumentParser(description="Unified Training Script for PaTS Models")
 
-    # Common arguments
+    # Common arguments (agnostic to `model_type`)
     parser.add_argument(
-        "--model_type", type=str, required=True, choices=["lstm", "ttm", "xgboost"], help="Type of model to train."
+        "--model_type",
+        type=str,
+        required=True,
+        choices=["lstm", "ttm", "xgboost"],
+        help="Type of model to train.",
     )
     parser.add_argument(
         "--dataset_dir",
@@ -311,12 +323,18 @@ def main():
         required=True,
         help="Path to the directory containing train_files.txt, etc. (e.g., data/blocks_4).",
     )
-    parser.add_argument("--num_blocks", type=int, required=True, help="Number of blocks for this training run.")
-    parser.add_argument("--output_dir", type=Path, required=True, help="Base directory to save trained models and logs.")
-    parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs.")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size.")
-    parser.add_argument("--learning_rate", type=float, default=1e-3, help="Learning rate.")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility.")
+    parser.add_argument(
+        "--num_blocks",
+        type=int,
+        required=True,
+        help="Number of blocks for this training run.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=Path,
+        required=True,
+        help="Base directory to save trained models and logs.",
+    )
     parser.add_argument(
         "--encoding_type",
         type=str,
@@ -324,42 +342,79 @@ def main():
         choices=["bin", "sas"],
         help="The encoding type of the dataset to use.",
     )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=100,
+        help="Number of training epochs. Default is 100.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=32,
+        help="Batch size. Default is 32.",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-3,
+        help="Learning rate. Default is 1e-3.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=13,
+        help="Random seed for reproducibility. Default is 13.",
+    )
 
     # LSTM specific arguments
-    parser.add_argument("--lstm_hidden_size", type=int, default=128, help="Hidden size for LSTM.")
-    parser.add_argument("--lstm_num_layers", type=int, default=2, help="Number of LSTM layers.")
-    parser.add_argument("--lstm_dropout_prob", type=float, default=0.2, help="Dropout probability for LSTM.")
+    parser.add_argument(
+        "--lstm_hidden_size",
+        type=int,
+        default=128,
+        help="Hidden size for LSTM. Default is 128.",
+    )
+    parser.add_argument(
+        "--lstm_num_layers",
+        type=int,
+        default=2,
+        help="Number of LSTM layers. Default is 2.",
+    )
+    parser.add_argument(
+        "--lstm_dropout_prob",
+        type=float,
+        default=0.2,
+        help="Dropout probability for LSTM. Default is 0.2.",
+    )
+    parser.add_argument(
+        "--lstm_embedding_dim",
+        type=int,
+        default=32,
+        help="Embedding dimension for SAS+ encoding. Default is 32.",
+    )
     parser.add_argument(
         "--clip_grad_norm",
         type=float,
         default=1.0,
-        help="Gradient clipping norm for LSTM (0 to disable). TTM handles internally.",
-    )
-    parser.add_argument("--use_mlm_task", action="store_true", help="Enable MLM auxiliary task for LSTM.")
-    parser.add_argument("--mlm_loss_weight", type=float, default=0.2, help="Weight for the MLM auxiliary loss.")
-    parser.add_argument(
-        "--mlm_mask_prob", type=float, default=0.15, help="Probability of masking a predicate for the MLM task."
-    )
-    parser.add_argument("--lstm_embedding_dim", type=int, default=32, help="Embedding dimension for SAS+ encoding.")
-    parser.add_argument(
-        "--use_constraint_loss", action="store_true", help="Enable constraint violation auxiliary loss for LSTM."
-    )
-    parser.add_argument(
-        "--constraint_loss_weight", type=float, default=1.0, help="Weight for the constraint violation auxiliary loss."
+        help="Gradient clipping norm for LSTM (0 to disable). Default is 1.0",
     )
 
     # TTM specific arguments
     parser.add_argument(
         "--ttm_model_path",
         type=str,
-        default="ibm-granite/granite-timeseries-ttm-r2",
-        help="Base TTM model path from HuggingFace or local.",
+        default="ibm-granite/granite-timeseries-ttm-r2.1",
+        help="Base TTM model path from HuggingFace or local. Default is 'ibm-granite/granite-timeseries-ttm-r2.1'.",
     )
     parser.add_argument(
-        "--context_length", type=int, help="Context length for TTM. If not provided, determined from dataset."
+        "--context_length",
+        type=int,
+        help="Context length for TTM. If not provided, determined from dataset.",
     )
     parser.add_argument(
-        "--prediction_length", type=int, help="Prediction length for TTM. If not provided, determined from dataset."
+        "--prediction_length",
+        type=int,
+        help="Prediction length for TTM. If not provided, determined from dataset.",
     )
     parser.add_argument(
         "--log_level",
@@ -382,17 +437,45 @@ def main():
     print("Parsed Arguments:")
     pprint(vars(args))
 
-    if args.model_type == "ttm" and (args.mlm_loss_weight or args.mlm_mask_prob):
-        warnings.warn("MLM-related arguments are not applicable for TTM. Ignoring them.")
+    # lstm_param_names = [
+    #     args.lstm_hidden_size,
+    #     args.lstm_num_layers,
+    #     args.lstm_dropout_prob,
+    #     args.lstm_embedding_dim,
+    #     args.clip_grad_norm,
+    # ]
+    # ttm_param_names = [
+    #     args.ttm_model_path,
+    #     args.context_length,
+    #     args.prediction_length,
+    #     args.log_level,
+    # ]
+    # xgboost_param_names = [args.xgboost_context_window_size]
+    # if (  # Confirm if `model_type`=='lstm' that non-lstm related parameters are not given
+    #     args.model_type == "lstm"
+    #     and any(param is not None for param in ttm_param_names)
+    #     and any(param is not None for param in xgboost_param_names)
+    # ):
+    #     sys.exit("TTM and XGBoost related arguments are not applicable for LSTM. Exiting.")
 
-    if args.model_type == "ttm" and (args.use_constraint_loss or args.constraint_loss_weight != 1.0):
-        warnings.warn("Constraint loss arguments are not applicable for TTM. Ignoring them.")
+    # if (  # Confirm if `model_type`=='xgboost' that non-xgboost related parameters are not given
+    #     args.model_type == "xgboost"
+    #     and any(param is not None for param in lstm_param_names)
+    #     and any(param is not None for param in ttm_param_names)
+    # ):
+    #     sys.exit("LSTM and TTM related arguments are not applicable for XGBoost. Exiting.")
+
+    # if (  # Confirm if `model_type`=='ttm' that non-ttm related parameters are not given
+    #     args.model_type == "ttm"
+    #     and any(param is not None for param in lstm_param_names)
+    #     and any(param is not None for param in xgboost_param_names)
+    # ):
+    #     sys.exit("LSTM and XGBoost related arguments are not applicable for TTM. Exiting.")
 
     print(f"Using device: {DEVICE}")
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
-
     if args.model_type == "ttm":
         ttm_set_seed(args.seed)  # Specific seed setting for TTM/HuggingFace Trainer
 
@@ -401,39 +484,17 @@ def main():
     model_specific_output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Model outputs will be saved to: {model_specific_output_dir}")
 
-    # Instantiate the validator for use in training
-    validator = None
-    if args.model_type == "lstm" and args.use_constraint_loss:
-        print("Constraint loss enabled. Initializing BlocksWorldValidator...")
-        if args.encoding_type == "bin":
-            try:
-                # Validator now takes raw_data_dir to find the manifest
-                validator = BlocksWorldValidator(args.num_blocks, args.encoding_type, raw_data_dir=args.dataset_dir)
-                print("Validator for binary encoding initialized successfully.")
-            except Exception as e:
-                print(
-                    f"ERROR: Predicate manifest not found at {args.dataset_dir / f'predicate_manifest_{args.num_blocks}.txt'}. Cannot use constraint loss for binary encoding."
-                )
-                print("Please ensure the manifest file exists in the raw_data_dir.")
-                print(f"ERROR: Failed to initialize validator: {e}")
-                sys.exit(1)
-        elif args.encoding_type == "sas":
-            # SAS validator doesn't need a manifest file.
-            print("WARNING: Constraint loss for SAS encoding is not implemented and will have no effect.")
-            validator = BlocksWorldValidator(args.num_blocks, args.encoding_type, raw_data_dir=args.dataset_dir)
-            print("Validator for SAS encoding initialized.")
-
     # Load Datasets
-    print("Loading datasets...")
-    # dataset_dir is now the RAW_BLOCK_DIR (e.g., data/raw_problems/blocksworld/N4)
+    # `dataset_dir` is the RAW_BLOCK_DIR (e.g., data/raw_problems/blocksworld/N4)
     # We need to construct the PROCESSED_BLOCK_ENCODING_DIR
     processed_data_for_encoding_dir = (
-        args.dataset_dir.parent.parent
+        args.dataset_dir.parent.parent.parent
         / "processed_trajectories"
         / args.dataset_dir.parent.name
         / args.dataset_dir.name
         / args.encoding_type
     )
+    print(f"Loading datasets from {processed_data_for_encoding_dir} based on splits in {args.dataset_split_dir}.")
 
     try:
         train_dataset = PaTSDataset(
@@ -453,36 +514,35 @@ def main():
         sys.exit(1)
 
     if train_dataset.state_dim is None or train_dataset.state_dim <= 0:
-        print(
-            f"Could not determine num_features for {args.num_blocks} blocks from {args.dataset_dir}. Check dataset integrity and paths."
-        )
+        print(f"Could not determine num_features for {args.num_blocks} blocks from {args.dataset_dir}.")
+        print("Check dataset integrity and paths.")
         sys.exit(1)
     num_features = train_dataset.state_dim
     print(f"Number of features (state_dim) from dataset: {num_features}")
 
     if len(train_dataset) == 0:
-        print(
+        sys.exit(
             f"Training dataset for N={args.num_blocks} is empty. Check {args.dataset_split_dir / 'train_files.txt'}. Exiting."
         )
-        sys.exit(1)
     if len(val_dataset) == 0:
-        print(
+        sys.exit(
             f"Warning: Validation dataset for N={args.num_blocks} is empty. Check {args.dataset_split_dir / 'val_files.txt'}."
         )
 
     if args.model_type == "lstm":
-        # Use partial to create a collate function with the mlm_mask_prob argument
-        collate_fn_with_args = partial(lstm_collate_fn, mlm_mask_prob=args.mlm_mask_prob if args.use_mlm_task else 0.0)
-
         train_dataloader = DataLoader(
-            train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn_with_args, num_workers=0
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            collate_fn=lstm_collate_fn,
+            num_workers=0,
         )
-        val_dataloader = (
-            DataLoader(
-                val_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn_with_args, num_workers=0
-            )
-            if len(val_dataset) > 0
-            else None
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=lstm_collate_fn,
+            num_workers=0,
         )
 
         model = PaTS_LSTM(
@@ -490,18 +550,26 @@ def main():
             hidden_size=args.lstm_hidden_size,
             num_lstm_layers=args.lstm_num_layers,
             dropout_prob=args.lstm_dropout_prob,
-            use_mlm_task=args.use_mlm_task if args.encoding_type == "binary" else False,  # Disable MLM for SAS+
             encoding_type=args.encoding_type,
             num_blocks=args.num_blocks,
             embedding_dim=args.lstm_embedding_dim,
         ).to(DEVICE)
-        setattr(model, "target_num_blocks", args.num_blocks)
+
+        setattr(model, "target_num_blocks", args.num_blocks)  # For saving/loading purposes
         print(model)
+
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Total trainable LSTM parameters: {total_params}")
 
         lstm_model_save_path = model_specific_output_dir / f"pats_lstm_model_N{args.num_blocks}.pth"
-        train_lstm_model_loop(model, train_dataloader, val_dataloader, validator, args, num_features, lstm_model_save_path)
+        train_lstm_model_loop(
+            model,
+            train_dataloader,
+            val_dataloader,
+            args,
+            num_features,
+            lstm_model_save_path,
+        )
 
     elif args.model_type == "ttm":
         print("Starting TTM training setup...")

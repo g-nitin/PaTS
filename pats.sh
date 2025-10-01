@@ -17,10 +17,13 @@ echo $CONDA_DEFAULT_ENV
 hostname
 echo "Python version: $(python --version)"
 
-model_type='llama'  # `lstm`, `ttm`, `xgboost`, `llama`
 num_blocks=4
 domain_name="blocksworld"
 encoding='sas' # `sas`, `bin`
+model_type='lstm'  # `lstm`, `ttm`, `xgboost`, `llama`
+
+# If `model_type` == 'llama'
+llama_model_id="meta-llama/Llama-3.1-8B-Instruct"
 
 RAW_BLOCK_DIR="data/raw_problems/$${domain_name}/N$${num_blocks}"
 PROCESSED_BLOCK_ENCODING_DIR="data/processed_trajectories/$${domain_name}/N$${num_blocks}/${encoding}"
@@ -29,27 +32,28 @@ PROCESSED_BLOCK_ENCODING_DIR="data/processed_trajectories/$${domain_name}/N$${nu
 timestamp=$(date +%Y%m%d_%H%M%S)
 output_base_dir="./training_outputs/training_outputs_${encoding}/${model_type}_${timestamp}"
 benchmark_output_dir="./benchmark_results/benchmark_results_${encoding}/${model_type}_${timestamp}"
-llama_model_id="meta-llama/Llama-3.1-8B-Instruct"
-
 mkdir -p "${output_base_dir}"
-mkdir -p "$benchmark_output_dir" # Ensure benchmark output directory exists
+mkdir -p "$benchmark_output_dir"
 
 if [ "$model_type" = 'lstm' ]; then
     echo "Using LSTM model"
-    model_path="${output_base_dir}/${model_type}_N${num_blocks}/pats_lstm_model_N${num_blocks}.pth"
     echo "\n"
+    
+    model_path="${output_base_dir}/${model_type}_N${num_blocks}/pats_lstm_model_N${num_blocks}.pth"
     python -m scripts.train_model \
         --model_type $model_type \
         --dataset_dir "$RAW_BLOCK_DIR" \
+        --dataset_split_dir "${RAW_BLOCK_DIR}/splits" \
         --processed_data_dir "$PROCESSED_BLOCK_ENCODING_DIR" \
         --num_blocks "$num_blocks" \
-        --encoding_type "$encoding" \
         --output_dir "${output_base_dir}" \
+        --encoding_type "$encoding" \
         --epochs 400 \
         --batch_size 32 \
         --learning_rate 0.001 \
         --seed 13 \
-        # LSTM specific args here if needed (e.g., --use_mlm_task, --use_constraint_loss)
+        # LSTM specific args here following...
+
     echo "\n"
     echo "Training completed. Outputs in ${output_base_dir}"
 

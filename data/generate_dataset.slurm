@@ -5,17 +5,17 @@
 #SBATCH --time=24:00:00
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
+#SBATCH --partition=wholenode
 # Choose how many shards (array tasks) YOU want to run concurrently.
 # Edit this line to scale out (e.g., 1-40).
 #SBATCH --array=1-20
-#SBATCH --partition=wholenode
 
 ## USER KNOBS (EDIT THESE)
 # Total problems to generate per block size (matches original script intention)
-PROBLEMS_PER_CONFIG=10000
+PROBLEMS_PER_CONFIG=100
 
 # Problems per shard (array task). Total shards × CHUNK_SIZE should cover PROBLEMS_PER_CONFIG.
-CHUNK_SIZE=500
+CHUNK_SIZE=5
 
 # Per-node parallel workers inside each shard (usually match --cpus-per-task)
 PARALLEL_JOBS=${SLURM_CPUS_ON_NODE:-16}
@@ -24,8 +24,8 @@ PARALLEL_JOBS=${SLURM_CPUS_ON_NODE:-16}
 OVERWRITE_EXISTING=1
 
 # PDDL block counts to generate (inclusive range)
-MIN_BLOCKS_TO_GENERATE=5
-MAX_BLOCKS_TO_GENERATE=5
+MIN_BLOCKS_TO_GENERATE=6
+MAX_BLOCKS_TO_GENERATE=6
 
 # Fast Downward config
 FD_TIMEOUT="60s"

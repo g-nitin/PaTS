@@ -46,14 +46,14 @@ DOMAIN_NAME="blocksworld"
 ENCODING_TYPE="sas"
 
 # MIN_BLOCKS & MAX_BLOCKS: Range of block numbers for problem generation
-MIN_BLOCKS_TO_GENERATE=5
-MAX_BLOCKS_TO_GENERATE=5
+MIN_BLOCKS_TO_GENERATE=6
+MAX_BLOCKS_TO_GENERATE=6
 
 # This will be the root for raw_problems and processed_trajectories
 BASE_DATA_DIR="./data"
 
 # PROBLEMS_PER_CONFIG: Number of problems to generate for each block count
-PROBLEMS_PER_CONFIG=10000
+PROBLEMS_PER_CONFIG=100000
 
 # FD_TIMEOUT: Timeout for Fast Downward (e.g., 60s, 5m)
 FD_TIMEOUT="60s"
@@ -99,6 +99,7 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
         read -p "Processed trajectories directory '$PROCESSED_BLOCK_ENCODING_DIR' already exists. Overwrite contents of subfolders for selected block sizes? (y/n): " overwrite_choice
         if [ "$overwrite_choice" != "y" ]; then
             echo "Skipping generation for $num_blocks blocks."
+            echo "That is because the processed trajectories '$PROCESSED_BLOCK_ENCODING_DIR' already exists."
             continue
         fi
     fi

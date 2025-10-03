@@ -27,7 +27,7 @@ PROBLEM_GENERATOR_SCRIPT="${ROOT_DIR}pddl-generators/blocksworld/blocksworld"
 FD_PATH="${ROOT_DIR}downward/fast-downward.py"
 
 # VALIDATE_PATH: Path to the VAL executable
-VALIDATE_PATH="${ROOT_DIR}VAL/validate"
+VALIDATE_PATH="${ROOT_DIR}VAL/bin/Validate"
 
 # PARSER_ENCODER_SCRIPT: Python script to parse VAL output, PDDL, and encode states
 PARSER_ENCODER_SCRIPT="./data/parse_and_encode.py"

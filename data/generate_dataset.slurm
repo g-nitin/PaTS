@@ -1,11 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=pddl-dset
-#SBATCH --output=logs/%x_%A_%a.out
-#SBATCH --error=logs/%x_%A_%a.err
-#SBATCH --time=24:00:00
+#SBATCH --output=logs/%x_%A_%a_%j.out
+#SBATCH --error=logs/%x_%A_%a_%j.err
+
+#SBATCH --mail-user=niting@email.sc.edu
+#SBATCH --mail-type=ALL
+
+#SBATCH --partition=wholenode
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
-#SBATCH --partition=wholenode
+# SBATCH --time=24:00:00
 # Choose how many shards (array tasks) YOU want to run concurrently.
 # Edit this line to scale out (e.g., 1-40).
 #SBATCH --array=1-20
@@ -38,6 +42,7 @@ USE_GLOBAL_DEDUP=1
 # $HOME: /home/x-ngupta6
 module use "$HOME/privatemodules"
 module load conda-env/pats-py3.12.8
+conda activate pats
 
 # Fail fast on undefined vars; don't exit on first error (we handle per-task errors)
 set -u
@@ -50,7 +55,7 @@ ROOT_DIR="$HOME/planning/"
 DOMAIN_FILE="${ROOT_DIR}pddl-generators/blocksworld/4ops/domain.pddl"
 PROBLEM_GENERATOR_SCRIPT="${ROOT_DIR}pddl-generators/blocksworld/blocksworld"
 FD_PATH="${ROOT_DIR}downward/fast-downward.py"
-VALIDATE_PATH="${ROOT_DIR}VAL/validate"
+VALIDATE_PATH="${ROOT_DIR}VAL/bin/Validate"
 
 PARSER_ENCODER_SCRIPT="./data/parse_and_encode.py"
 ANALYZE_AND_SPLIT_SCRIPT="./data/analyze_dataset_splits.py"

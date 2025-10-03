@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=pddl-dset
-#SBATCH --output=logs/%x_%A_%a.out
-#SBATCH --error=logs/%x_%A_%a.err
+#SBATCH --output=logs/%x_%A_%a_%j.out
+#SBATCH --error=logs/%x_%A_%a_%j.err
 
 #SBATCH --mail-user=niting@email.sc.edu
 #SBATCH --mail-type=ALL
@@ -11,7 +11,6 @@
 # $HOME: /home/x-ngupta6
 module use "$HOME/privatemodules"
 module load conda-env/pats-py3.12.8
-
 conda activate pats
 
 # ROOT_DIR: Base directory for all planning related tools and files

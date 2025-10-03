@@ -1,7 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=pddl-dset
-#SBATCH --output=logs/%x_%A_%a_%j.out
-#SBATCH --error=logs/%x_%A_%a_%j.err
+#SBATCH --output=slurm/%x_%j.out
+#SBATCH --error=slurm/%x_%j.err
+
+# %x gives job name
+# %A Job array's master job allocation number.
+# %a Job array ID (index) number.
+# %j Job allocation number.
+# %N Node name. Only one file is created, so %N will be replaced
+#    by the name of the first node in the job, which is the one
+#    that runs the script.
+# %u User name.
 
 #SBATCH --mail-user=niting@email.sc.edu
 #SBATCH --mail-type=ALL

@@ -183,7 +183,7 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
 
         # 4. Parse VAL output, PDDL, encode states, and save trajectory
         echo "    Encoding trajectory for $PROBLEM_BASENAME using '$ENCODING_TYPE' encoding..."
-        uv run python "$PARSER_ENCODER_SCRIPT" \
+        python "$PARSER_ENCODER_SCRIPT" \
             --val_output_file "$VAL_OUTPUT_FILE" \
             --pddl_domain_file "$DOMAIN_FILE" \
             --pddl_problem_file "$PDDL_FILE" \
@@ -200,7 +200,7 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
         fi
 
         # Check for uniqueness based on initial/goal states from the generated text trajectory
-        PROBLEM_HASH=$(uv run python "$GET_PROBLEM_HASH_SCRIPT" "$TEXT_TRAJECTORY_FILE")
+        PROBLEM_HASH=$(python "$GET_PROBLEM_HASH_SCRIPT" "$TEXT_TRAJECTORY_FILE")
         if [ $? -ne 0 ] || [ -z "$PROBLEM_HASH" ]; then
             echo "    ERROR: Failed to get problem hash for $PROBLEM_BASENAME. Skipping."
             TOTAL_FAILED_ENCODING=$((TOTAL_FAILED_ENCODING + 1)) # Count as encoding failure
@@ -238,7 +238,7 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
         # `output_dir`: Directory to save the split files (train_files.txt, etc.) and distribution plots. This will be RAW_BLOCK_DIR/splits
     echo -e "\n"
     echo "Analyzing dataset splits for $num_blocks blocks..."
-    uv run python "$ANALYZE_AND_SPLIT_SCRIPT" \
+    python "$ANALYZE_AND_SPLIT_SCRIPT" \
         "$RAW_BLOCK_DIR"
 
     if [ $? -ne 0 ]; then

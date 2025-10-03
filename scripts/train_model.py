@@ -73,13 +73,19 @@ def main():
         "--dataset_dir",
         type=Path,
         required=True,
-        help="Path to the PaTS dataset directory for a specific N (e.g., data/blocks_4).",
+        help="Path to the PaTS dataset directory for a specific N (e.g., data/raw_problems/blocksworld/N4).",
     )
     parser.add_argument(
         "--dataset_split_dir",
         type=Path,
         required=True,
-        help="Path to the directory containing train_files.txt, etc. (e.g., data/blocks_4).",
+        help="Path to the directory containing train_files.txt, etc. (e.g., data/raw_problems/blocksworld/N4/splits).",
+    )
+    parser.add_argument(
+        "--processed_block_encoding_dir",
+        type=Path,
+        required=True,
+        help="Path to the processed block encoding directory (e.g., 'data/processed_trajectories/blocksworld/N4/bin')",
     )
     parser.add_argument(
         "--num_blocks",
@@ -196,41 +202,6 @@ def main():
     pprint(vars(args))
     print()
 
-    # lstm_param_names = [
-    #     args.lstm_hidden_size,
-    #     args.lstm_num_layers,
-    #     args.lstm_dropout_prob,
-    #     args.lstm_embedding_dim,
-    #     args.clip_grad_norm,
-    # ]
-    # ttm_param_names = [
-    #     args.ttm_model_path,
-    #     args.context_length,
-    #     args.prediction_length,
-    #     args.log_level,
-    # ]
-    # xgboost_param_names = [args.xgboost_context_window_size]
-    # if (  # Confirm if `model_type`=='lstm' that non-lstm related parameters are not given
-    #     args.model_type == "lstm"
-    #     and any(param is not None for param in ttm_param_names)
-    #     and any(param is not None for param in xgboost_param_names)
-    # ):
-    #     sys.exit("TTM and XGBoost related arguments are not applicable for LSTM. Exiting.")
-
-    # if (  # Confirm if `model_type`=='xgboost' that non-xgboost related parameters are not given
-    #     args.model_type == "xgboost"
-    #     and any(param is not None for param in lstm_param_names)
-    #     and any(param is not None for param in ttm_param_names)
-    # ):
-    #     sys.exit("LSTM and TTM related arguments are not applicable for XGBoost. Exiting.")
-
-    # if (  # Confirm if `model_type`=='ttm' that non-ttm related parameters are not given
-    #     args.model_type == "ttm"
-    #     and any(param is not None for param in lstm_param_names)
-    #     and any(param is not None for param in xgboost_param_names)
-    # ):
-    #     sys.exit("LSTM and XGBoost related arguments are not applicable for TTM. Exiting.")
-
     print(f"Using device: {DEVICE}")
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -243,28 +214,16 @@ def main():
     model_specific_output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Model outputs will be saved to: {model_specific_output_dir}")
 
-    # Load Datasets
-    # `dataset_dir` is the RAW_BLOCK_DIR (e.g., data/raw_problems/blocksworld/N4)
-    # We need to construct the PROCESSED_BLOCK_ENCODING_DIR
-    processed_data_for_encoding_dir = (
-        args.dataset_dir.parent.parent.parent
-        / "processed_trajectories"
-        / args.dataset_dir.parent.name
-        / args.dataset_dir.name
-        / args.encoding_type
-    )
-    print(f"Loading datasets from {processed_data_for_encoding_dir} based on splits in {args.dataset_split_dir}.")
-
     try:
         train_dataset = PaTSDataset(
             raw_data_dir=args.dataset_dir,
-            processed_data_dir=processed_data_for_encoding_dir,
+            processed_data_dir=args.processed_block_encoding_dir,
             split_file_name="train_files.txt",
             encoding_type=args.encoding_type,
         )
         val_dataset = PaTSDataset(
             raw_data_dir=args.dataset_dir,
-            processed_data_dir=processed_data_for_encoding_dir,
+            processed_data_dir=args.processed_block_encoding_dir,
             split_file_name="val_files.txt",
             encoding_type=args.encoding_type,
         )
@@ -341,7 +300,7 @@ def main():
             for basename_for_len_check in train_dataset.basenames:  # Iterate through filtered basenames
                 # Construct full path to .npy file using processed_data_for_encoding_dir
                 traj_file_path_for_len = (
-                    processed_data_for_encoding_dir / f"{basename_for_len_check}.traj.{args.encoding_type}.npy"
+                    args.processed_block_encoding_dir / f"{basename_for_len_check}.traj.{args.encoding_type}.npy"
                 )
                 if traj_file_path_for_len.exists():
                     try:

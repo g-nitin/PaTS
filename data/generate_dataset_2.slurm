@@ -12,6 +12,8 @@
 module use "$HOME/privatemodules"
 module load conda-env/pats-py3.12.8
 
+conda activate pats
+
 # ROOT_DIR: Base directory for all planning related tools and files
 ROOT_DIR="$HOME/planning/"
 

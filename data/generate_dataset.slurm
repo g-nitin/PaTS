@@ -16,6 +16,8 @@
 #SBATCH --mail-type=ALL
 
 #SBATCH --partition=wholenode
+#SBATCH --time=96:00:00
+# Max time for `wholenode` partition is 96 hours (4 days)
 
 # $HOME: /home/x-ngupta6
 module use "$HOME/privatemodules"

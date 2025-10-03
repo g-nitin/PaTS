@@ -1,9 +1,13 @@
+import warnings
+from pathlib import Path
+from typing import List
+
+import matplotlib.pyplot as plt
+import seaborn as sns
 import torch
 import torch.nn as nn
+import torch.optim as optim
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, pad_sequence
-
-# ** Configuration **
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 
 
 # ** Model Definition **
@@ -199,6 +203,316 @@ class PaTS_LSTM(nn.Module):
             next_state_probs = torch.sigmoid(next_state_logits)
             next_state_binary = (next_state_probs > 0.5).float()
             return next_state_binary, next_state_probs, h_next, c_next
+
+
+def plot_training_curves(
+    train_losses: List[float],
+    val_losses: List[float],
+    train_forecast_losses: List[float],
+    val_forecast_losses: List[float],
+    epochs: int,
+    model_type: str,
+    encoding_type: str,
+    num_blocks: int,
+    output_dir: Path,
+):
+    """
+    Plots and saves the training and validation loss curves.
+    """
+    if not train_losses or not val_losses:
+        print("No loss data to plot.")
+        return
+
+    sns.set_theme()  # Apply seaborn theme for aesthetics
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(range(1, epochs + 1), train_losses, label="Train Total Loss")
+    plt.plot(range(1, epochs + 1), val_losses, label="Validation Total Loss")
+    plt.plot(range(1, epochs + 1), train_forecast_losses, label="Train Forecast Loss", linestyle="--")
+    plt.plot(range(1, epochs + 1), val_forecast_losses, label="Validation Forecast Loss", linestyle="--")
+
+    plt.title(f"{model_type} Training & Validation Loss (N={num_blocks}, Encoding={encoding_type})")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.grid(True)
+
+    plot_filename = f"training_loss_{model_type}_N{num_blocks}_{encoding_type}.png"
+    plt.savefig(output_dir / plot_filename)
+    plt.close()  # Close the plot to free memory
+    print(f"Training loss plot saved to {output_dir / plot_filename}")
+
+
+def train_lstm_model_loop(
+    model,
+    train_loader,
+    val_loader,
+    args,
+    num_features,
+    model_save_path,
+    DEVICE=torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")),
+):
+    """
+    Train the provided LSTM-based PaTS model over multiple epochs.
+    This function runs a full training loop over the given `train_loader`, evaluates on `val_loader` each epoch,
+    and saves the best model (by validation loss) to `model_save_path`.
+    It supports two encoding modes:
+        - "sas" (SAS+): forecasting is performed as a multi-class classification over locations for each block. CrossEntropyLoss is used and MLM / constraint losses are disabled.
+        - "bin": forecasting is performed as independent binary predictions per block-location via BCEWithLogitsLoss. Similar to One-hot encoding. Optional MLM and constraint violation losses may be included.
+    Uses AdamW optimizer and ReduceLROnPlateau scheduler (monitoring validation loss).
+
+    - For binary encoding:
+        - Forecasting loss is computed per-element using BCEWithLogitsLoss with reduction="none" and then averaged over only the valid (un-padded) forecast elements.
+        - MLM loss (if args.use_mlm_task) is computed similarly by masking to the mlm_predicate_mask and averaged over masked elements.
+        - Forecasting logits and targets are expected to have shape (B, S_max, N_blocks) (logits are raw, targets are 0/1 floats or ints). mlm_logits and mlm_predicate_mask (if used) should align in shape with input_seqs (B, S_max, N_blocks).
+    - For SAS+ encoding:
+        - Forecasting logits are expected to have shape (B, S_max, N_blocks, N_locs) and targets shape
+            (B, S_max, N_blocks) containing integer class labels. Targets are mapped to class indices via model._map_sas_to_indices before applying CrossEntropyLoss.
+
+    - Saves a checkpoint dict containing model/optimizer state_dict, training hyperparameters and metadata whenever a new best validation loss is observed.
+
+    :param model: The PaTS LSTM model to train. Must implement forward(input_seqs, goal_states, lengths) and return a tuple (forecasting_logits, mlm_logits, ...).
+        For SAS+ encoding, model must provide model.num_locations and method model._map_sas_to_indices(target_tensor) that maps SAS+ targets to class indices.
+    :param train_loader: DataLoader or iterable yielding batches as dictionaries with keys:
+        - "input_sequences": tensor, shape (B, S_max, N_blocks) (int for SAS+, float/binary for binary)
+        - "goal_states": tensor, shape compatible with model (commonly (B, N_blocks) or (B, S_max, N_blocks))
+        - "target_sequences": tensor, shape (B, S_max, N_blocks)
+    :param val_loader: Validation DataLoader/iterable with the same batch dictionary format as train_loader. If None, validation is skipped (but scheduler.step will still be called with inf).
+    :param args: Configuration with fields (used fields):
+        - encoding_type: "sas" or "binary"
+        - num_blocks: int (used for SAS+ clamping / metadata)
+        - epochs: int
+        - learning_rate: float
+        - lstm_hidden_size, lstm_num_layers, lstm_dropout_prob, lstm_embedding_dim: training metadata saved in checkpoint
+    :param num_features: Number of input features (saved in the checkpoint metadata).
+    :param model_save_path: File path where the best model checkpoint dict will be saved via torch.save when validation loss improves.
+    :return: None
+    """
+
+    print("\nStarting LSTM training...")
+
+    # Select Loss Function based on Encoding
+    if args.encoding_type == "sas":
+        # For SAS+, the model outputs logits for each possible location (class) for each block.
+        # The target is the index of the correct location.
+        criterion = nn.CrossEntropyLoss()
+        print("Using CrossEntropyLoss for SAS+ encoding.")
+    else:  # binary
+        criterion = nn.BCEWithLogitsLoss(reduction="none")
+        print("Using BCEWithLogitsLoss for binary encoding.")
+
+    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=10, factor=0.5)
+
+    best_val_loss = float("inf")
+    sas_clamp_warning_issued = False
+
+    # Lists to store losses for plotting
+    train_losses_history = []
+    val_losses_history = []
+    train_forecast_losses_history = []
+    val_forecast_losses_history = []
+
+    for epoch in range(args.epochs):
+        model.train()
+        epoch_train_loss, epoch_forecast_loss = 0.0, 0.0
+        num_train_batches = 0
+
+        for batch_data in train_loader:
+            if batch_data is None:
+                continue
+            input_seqs = batch_data["input_sequences"].to(DEVICE)
+            goal_states = batch_data["goal_states"].to(DEVICE)
+            target_seqs = batch_data["target_sequences"].to(DEVICE)
+            lengths = batch_data["lengths"]
+
+            # Safeguard for SAS+ encoding to prevent out-of-bounds embedding errors.
+            if args.encoding_type == "sas":
+                max_val = args.num_blocks
+                # Check if any values are out of the expected [0, max_val] range.
+                if not sas_clamp_warning_issued and (torch.any(input_seqs > max_val) or torch.any(goal_states > max_val)):
+                    warnings.warn(
+                        f"SAS+ input data contains values > num_blocks ({max_val}). "
+                        f"Clamping values to prevent embedding layer errors. "
+                        f"Please check your dataset for correctness."
+                    )
+                    sas_clamp_warning_issued = True
+                input_seqs.clamp_(min=0, max=max_val)
+                goal_states.clamp_(min=0, max=max_val)
+
+            optimizer.zero_grad()
+            forecasting_logits, _ = model(input_seqs, goal_states, lengths)
+
+            # Modified Loss Calculation
+            if args.encoding_type == "sas":
+                # For CrossEntropyLoss, logits should be (N, C) and targets (N)
+                # N = total number of blocks to predict across batch, C = num_locations
+                # Create a mask to select only the valid time steps based on sequence lengths
+                mask = (
+                    torch.arange(max(lengths), device=DEVICE)[None, :] < lengths.clone().detach().to(DEVICE)[:, None]
+                )  # (B, S_max)
+
+                # Reshape logits and targets and apply the mask
+                # Logits: (B, S_max, N_blocks, N_locs) -> (num_active_steps, N_blocks, N_locs)
+                active_logits = forecasting_logits[mask]
+                # Targets: (B, S_max, N_blocks) -> (num_active_steps, N_blocks)
+                active_targets = target_seqs[mask]
+
+                if active_targets.numel() == 0:
+                    continue  # Skip batch if no valid targets
+
+                # Map SAS+ target values (e.g., 0 for table, 1..N for blocks) to class indices
+                active_targets_indices = model._map_sas_to_indices(active_targets)
+
+                # Final reshape for loss function
+                # (num_active_steps * N_blocks, N_locs) and (num_active_steps * N_blocks)
+                loss_forecasting = criterion(
+                    active_logits.reshape(-1, model.num_locations), active_targets_indices.reshape(-1)
+                )
+            else:  # Binary encoding loss calculation
+                # Create a mask for valid forecasting steps
+                # (B, S_max, N_blocks, N_locs)
+                forecasting_mask = torch.zeros_like(target_seqs, dtype=torch.bool).to(DEVICE)
+                for i, length_val in enumerate(lengths):
+                    if length_val > 0:
+                        forecasting_mask[i, :length_val, :] = True  # Mark valid steps
+
+                # Count the number of valid forecasting elements
+                num_forecast_elements = forecasting_mask.float().sum()
+                if num_forecast_elements == 0:
+                    continue
+
+                # Compute the loss
+                loss_forecasting_unreduced = criterion(forecasting_logits, target_seqs)
+                loss_forecasting = (loss_forecasting_unreduced * forecasting_mask.float()).sum() / num_forecast_elements
+
+            # Total Loss
+            total_loss = loss_forecasting
+            total_loss.backward()
+            if args.clip_grad_norm is not None and args.clip_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
+            optimizer.step()
+
+            epoch_train_loss += total_loss.item()
+            epoch_forecast_loss += loss_forecasting.item()
+            num_train_batches += 1
+
+        avg_train_loss = epoch_train_loss / num_train_batches if num_train_batches > 0 else float("inf")
+        avg_forecast_loss = epoch_forecast_loss / num_train_batches if num_train_batches > 0 else float("inf")
+
+        # Validation
+        model.eval()
+        epoch_val_loss, epoch_val_forecast_loss = 0.0, 0.0
+        num_val_batches = 0
+
+        with torch.no_grad():
+            if val_loader is not None:
+                for batch_data in val_loader:
+                    if batch_data is None:
+                        continue
+
+                    input_seqs = batch_data["input_sequences"].to(DEVICE)
+                    goal_states = batch_data["goal_states"].to(DEVICE)
+                    target_seqs = batch_data["target_sequences"].to(DEVICE)
+                    lengths = batch_data["lengths"]
+
+                    if args.encoding_type == "sas":
+                        input_seqs.clamp_(min=0, max=args.num_blocks)
+                        goal_states.clamp_(min=0, max=args.num_blocks)
+
+                    forecasting_logits, _ = model(input_seqs, goal_states, lengths)
+
+                    # Create a mask for valid forecasting steps
+                    # (B, S_max, N_blocks, N_locs)
+                    if args.encoding_type == "sas":
+                        mask = (
+                            torch.arange(max(lengths), device=DEVICE)[None, :]
+                            < lengths.clone().detach().to(DEVICE)[:, None]
+                        )
+                        active_logits = forecasting_logits[mask]
+                        active_targets = target_seqs[mask]
+
+                        if active_targets.numel() == 0:
+                            continue
+
+                        # Map active targets to their indices
+                        active_targets_indices = model._map_sas_to_indices(active_targets)
+                        loss_forecasting = criterion(
+                            active_logits.reshape(-1, model.num_locations), active_targets_indices.reshape(-1)
+                        )
+
+                    else:  # Binary
+                        # (B, S_max, N_blocks, N_locs)
+                        forecasting_mask = torch.zeros_like(target_seqs, dtype=torch.bool).to(DEVICE)
+                        for i, length_val in enumerate(lengths):
+                            if length_val > 0:
+                                forecasting_mask[i, :length_val, :] = True
+
+                        # Count the number of valid forecasting elements
+                        num_forecast_elements = forecasting_mask.float().sum()
+                        if num_forecast_elements == 0:
+                            continue
+
+                        # Compute the loss for the valid forecasting elements
+                        loss_forecasting_unreduced = criterion(forecasting_logits, target_seqs)
+                        loss_forecasting = (
+                            loss_forecasting_unreduced * forecasting_mask.float()
+                        ).sum() / num_forecast_elements
+
+                    total_loss = loss_forecasting
+                    epoch_val_loss += total_loss.item()
+                    epoch_val_forecast_loss += loss_forecasting.item()
+                    num_val_batches += 1
+
+        avg_val_loss = epoch_val_loss / num_val_batches if num_val_batches > 0 else float("inf")
+        avg_val_forecast_loss = epoch_val_forecast_loss / num_val_batches if num_val_batches > 0 else float("inf")
+        scheduler.step(avg_val_loss)
+
+        # Store losses for plotting
+        train_losses_history.append(avg_train_loss)
+        val_losses_history.append(avg_val_loss)
+        train_forecast_losses_history.append(avg_forecast_loss)
+        val_forecast_losses_history.append(avg_val_forecast_loss)
+
+        train_loss_str = f"Train Loss: {avg_train_loss:.4f} (F: {avg_forecast_loss:.4f})"
+        val_loss_str = f"Val Loss: {avg_val_loss:.4f} (F: {avg_val_forecast_loss:.4f})"
+        print(f"Epoch [{epoch + 1}/{args.epochs}] {train_loss_str}, {val_loss_str}")
+
+        # Save best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "loss": best_val_loss,
+                    "encoding_type": args.encoding_type,
+                    "num_features": num_features,
+                    "hidden_size": args.lstm_hidden_size,
+                    "num_lstm_layers": args.lstm_num_layers,
+                    "dropout_prob": args.lstm_dropout_prob,
+                    "target_num_blocks": args.num_blocks,
+                    "embedding_dim": args.lstm_embedding_dim if args.encoding_type == "sas" else None,
+                },
+                model_save_path,
+            )
+            print(f"Model saved to {model_save_path} (Val Loss: {best_val_loss:.4f})")
+
+    print("LSTM Training finished.")
+
+    # Call plotting function after training
+    plot_training_curves(
+        train_losses_history,
+        val_losses_history,
+        train_forecast_losses_history,
+        val_forecast_losses_history,
+        args.epochs,
+        args.model_type,
+        args.encoding_type,
+        args.num_blocks,
+        model_save_path.parent,  # Pass the directory where the model is saved
+    )
 
 
 def lstm_collate_fn(batch):

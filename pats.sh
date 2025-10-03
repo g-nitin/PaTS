@@ -60,7 +60,6 @@ if [ "$model_type" = 'lstm' ]; then
         --batch_size 32 \
         --learning_rate 0.001 \
         --seed 13 \
-        # LSTM specific args here following...
         > "${train_log_file}" 2>&1  # Redirect stdout and stderr to log file
 
     echo "\n"

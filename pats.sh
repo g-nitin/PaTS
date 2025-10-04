@@ -54,6 +54,7 @@ if [ -f "$MAX_PLAN_LENGTH_FILE" ]; then
     echo "Dynamically determined max plan length: $dynamic_max_plan_length"
 else
     echo "Warning: max_plan_length.txt not found at ${MAX_PLAN_LENGTH_FILE}. Using default max_plan_length: 60." >&2
+    exit 1
 fi
 
 if [ "$model_type" = 'lstm' ]; then

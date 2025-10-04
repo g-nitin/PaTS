@@ -257,9 +257,38 @@ def main():
     elif args.model_type == "xgboost":
         print("\nStarting XGBoost training setup...")
 
-        # 1. Prepare data in tabular format
+        # Find max plan length from the dataset
+        max_plan_length = 0
+        if len(train_dataset.basenames) > 0:
+            for basename_for_len_check in train_dataset.basenames:  # Iterate through filtered basenames
+                # Construct full path to .npy file using processed_data_for_encoding_dir
+                traj_file_path_for_len = (
+                    args.processed_block_encoding_dir / f"{basename_for_len_check}.traj.{args.encoding_type}.npy"
+                )
+                if traj_file_path_for_len.exists():
+                    try:
+                        traj_np = torch.from_numpy(np.load(traj_file_path_for_len))
+                        if traj_np is not None and traj_np.ndim == 2:
+                            max_plan_length = max(max_plan_length, traj_np.shape[0])
+                    except Exception as e:
+                        print(f"Warning: Could not load trajectory {traj_file_path_for_len} to determine max length: {e}")
+                # else: # This can be too verbose if many files are not found (e.g. if basenames are not filtered)
+                # print(f"Warning: Trajectory file {traj_file_path_for_len} not found during max length check.")
+
+        if max_plan_length == 0:
+            print(
+                f"Warning: Could not determine max plan length from training data for N={args.num_blocks}. Defaulting to 60."
+            )
+            max_plan_length = 60
+
+        # Pad the max_plan_length with some extra buffer
+        max_plan_length += 5
+        print(f"Max plan length in training data for N={args.num_blocks}: {max_plan_length}")
+
         print("Preparing data for XGBoost...")
-        X_train, y_train = prepare_data_for_xgboost(train_dataset, args.xgboost_context_window_size)
+        X_train, y_train = prepare_data_for_xgboost(
+            train_dataset, args.xgboost_context_window_size, max_plan_length=max_plan_length
+        )
 
         if X_train.shape[0] == 0:
             print("ERROR: No training data could be generated for XGBoost. Exiting.")
@@ -271,6 +300,7 @@ def main():
             num_blocks=args.num_blocks,
             seed=args.seed,
             context_window_size=args.xgboost_context_window_size,
+            max_plan_length=max_plan_length,
         )
 
         planner.train(X_train, y_train)

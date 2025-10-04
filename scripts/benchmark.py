@@ -255,36 +255,46 @@ class XGBoostWrapper(PlannableModel):
         if self.planner is None:
             raise RuntimeError("XGBoost model not loaded. Call load_model() first.")
 
-        plan = [initial_state_np]
+        # 1. Construct the input vector X
+        context_states = [initial_state_np] * self.loaded_context_window_size
+        X_input = np.concatenate(context_states + [goal_state_np]).reshape(1, -1)
 
-        # Maintain a deque or list for the sliding context window
-        current_context_window = [initial_state_np] * self.loaded_context_window_size  # Initialize with S0 repeated
+        # 2. Predict the entire flattened plan in one shot
+        flattened_plan = self.planner.predict(X_input).flatten()
 
-        for _ in range(max_length - 1):  # max_length includes S0
-            # Construct the input for prediction
-            # The context window should contain the last `loaded_context_window_size` states
-            X_input_parts = current_context_window + [goal_state_np]
-            X_input = np.concatenate(X_input_parts).reshape(1, -1)
+        # 3. Reshape and find padding
+        state_dim = self.state_dim
 
-            next_state = self.planner.predict(X_input).flatten()
+        num_predicted_states = len(flattened_plan) // state_dim
+        predicted_states = flattened_plan.reshape(num_predicted_states, state_dim)
 
-            # Stagnation check: if the model predicts no change from the last state in the plan
-            if np.array_equal(plan[-1], next_state):
-                # print(f"XGBoost: Stagnation detected at step {len(plan)}. Stopping.")
+        # 4. Reconstruct the full plan and remove padding
+        # The padding value used during training was -99
+        padding_value = -99
+
+        # Find the index of the first row that is entirely the padding value
+        first_pad_idx = -1
+        for i in range(num_predicted_states):
+            if np.all(predicted_states[i] == padding_value):
+                first_pad_idx = i
                 break
 
-            plan.append(next_state)
+        # Slice to get the unpadded part of the plan
+        if first_pad_idx != -1:
+            unpadded_plan_steps = predicted_states[:first_pad_idx]
+        else:
+            unpadded_plan_steps = predicted_states
 
-            # Update the context window: remove oldest, add newest
-            current_context_window.pop(0)
-            current_context_window.append(next_state)
+        # Clip the predicted values to the valid SAS+ range [-1, num_blocks]
+        # This prevents the model from predicting impossible positions (e.g., on top of block 6)
+        unpadded_plan_steps = np.clip(unpadded_plan_steps, -1, self.num_blocks)
+        
+        # 4. Construct the final plan starting with the initial state
+        final_plan = [initial_state_np.tolist()]
+        final_plan.extend(unpadded_plan_steps.tolist())  # type: ignore
 
-            # Goal achievement check
-            if np.array_equal(next_state, goal_state_np):
-                # print(f"XGBoost: Goal reached at step {len(plan) - 1}.")
-                break
-
-        return [state.tolist() for state in plan]  # type: ignore
+        # 5. Truncate to the benchmark's max_length
+        return final_plan[:max_length]  # type: ignore
 
     @property
     def model_name(self) -> str:
@@ -409,7 +419,6 @@ def get_plannable_model(
         raise ValueError(f"Unsupported model type for PlannableModel factory: {model_type}")
 
 
-# ** Helper Functions for Benchmarking **
 def load_problem_basenames_from_split_file(split_file_path: Path) -> List[str]:
     if not split_file_path.exists():
         print(f"Warning: Split file not found: {split_file_path}")
@@ -785,32 +794,14 @@ def run_benchmark(args: argparse.Namespace):
     print(f"Initializing validator for N={num_blocks} with '{args.encoding_type}' encoding.")
 
     validator = None
-    if args.encoding_type == "bin":
-        # Construct the path to the predicate manifest for the specific num_blocks
-        try:
-            validator = BlocksWorldValidator(num_blocks, args.encoding_type, raw_data_dir=raw_block_dir)
-            print(f"Validator initialized with state_size={validator.state_size}.")
-        except Exception as e:
-            print(f"ERROR: Predicate manifest not found at {raw_block_dir / f'predicate_manifest_{num_blocks}.txt'}.")
-            print("Please ensure the manifest file exists in the raw_data_dir.")
-            print(f"ERROR: Failed to initialize BlocksWorldValidator for binary encoding: {e}")
-            return
-    elif args.encoding_type == "sas":
-        try:
-            # SAS encoding does not require a predicate manifest file.
-            # But the validator constructor still expects raw_data_dir
-            validator = BlocksWorldValidator(num_blocks, args.encoding_type, raw_data_dir=raw_block_dir)
-            print(f"Validator initialized with state_size={validator.state_size}.")
-        except Exception as e:
-            print(f"ERROR: Failed to initialize BlocksWorldValidator for SAS encoding: {e}")
-            return
-    else:
-        print(f"ERROR: Unknown encoding type '{args.encoding_type}'")
-        return
-    print(f"Validator initialized with state_size={validator.state_size}.")
-
-    # Initialize Model
     try:
+        validator = BlocksWorldValidator(num_blocks, args.encoding_type, raw_data_dir=raw_block_dir)
+        print(f"Validator initialized with state_size={validator.state_size}.")
+    except Exception as e:
+        print(f"ERROR: Failed to initialize BlocksWorldValidator: {e}")
+        return
+
+    try:  # Initialize Model
         wrapped_model: PlannableModel = get_plannable_model(
             model_type,
             model_path,

@@ -1,143 +1,132 @@
+import warnings
 from pathlib import Path
 from typing import Optional, Tuple
 
 import joblib
 import numpy as np
 import xgboost as xgb
-from sklearn.multioutput import MultiOutputClassifier
-from sklearn.preprocessing import LabelEncoder
+from sklearn.multioutput import MultiOutputRegressor
 
 from ..pats_dataset import PaTSDataset
 
 
-def prepare_data_for_xgboost(dataset: PaTSDataset, context_window_size: int) -> Tuple[np.ndarray, np.ndarray]:
+def prepare_data_for_xgboost(
+    dataset: PaTSDataset, context_window_size: int, max_plan_length: int
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Flattens the sequential dataset into a tabular format (X, y) for XGBoost, including a context window of past states.
-    X = (S_{t-k+1}, ..., S_t, S_G)
-    y = S_{t+1}
+    Flattens the dataset into a tabular format (X, y) for direct multi-step forecasting.
+    X = flatten(S_{t-k+1}, ..., S_t, S_G)
+    y = flatten(S_{t+1}, S_{t+2}, ..., S_Goal, <pad>, ..., <pad>)
+
+    The recommended setting for `max_plan_length` should be generous enough for the domain (e.g., 60 for 4 blocks).
     """
     X_list, y_list = [], []
+    state_dim = dataset.state_dim
+
+    # Using a padding value that is unlikely to be a valid state feature, e.g., -99
+    # For SAS+, valid values are -1 to N. For binary, 0 or 1. -99 works for both.
+    padding_value = -99
+
     for i in range(len(dataset)):
         item = dataset[i]
         trajectory = item["expert_trajectory"]  # (L, F)
         goal_state = item["goal_state"]  # (F,)
         initial_state = item["initial_state"]  # (F,)
 
-        # Create (S_{t-k+1}, ..., S_t, S_G) -> S_{t+1} pairs
-        for t in range(len(trajectory) - 1):  # Iterate from S_0 to S_{L-2} to predict S_1 to S_{L-1}
-            # current_state = trajectory[t]
-            next_state = trajectory[t + 1]
+        # We only need one training instance per plan: (S_0, S_G) -> (S_1, ..., S_Goal)
+        # Previous works (1) creates a sample from every possible window, but for planning, starting from S_0 is the most critical task.
+        # (1) Elsayed, Shereen, et al. "Do we really need deep learning models for time series forecasting?." arXiv preprint arXiv:2101.02118 (2021).
 
-            # Build the context window for S_t
-            context_states = []
-            for j in range(context_window_size):
-                idx_in_traj = t - (context_window_size - 1 - j)
-                if idx_in_traj >= 0:
-                    context_states.append(trajectory[idx_in_traj])
-                else:
-                    # Pad with initial_state if not enough history
-                    context_states.append(initial_state)
+        # Build the context window for the initial state S_0
+        context_states = [initial_state] * context_window_size
 
-            # Concatenate context states and goal state to form the feature vector X
-            X_sample = np.concatenate(context_states + [goal_state])
-            X_list.append(X_sample)
-            y_list.append(next_state)
+        # Create the input vector X
+        X_sample = np.concatenate(context_states + [goal_state])
+        X_list.append(X_sample)
+
+        # Create the output vector Y
+        remaining_plan = trajectory[1:]  # S_1, S_2, ... S_Goal
+
+        # Pad the remaining plan to max_plan_length
+        num_states_to_pad = max_plan_length - len(remaining_plan)
+
+        if num_states_to_pad < 0:
+            # If the expert plan is longer than our max, truncate it.
+            remaining_plan = remaining_plan[:max_plan_length]
+            padded_plan = remaining_plan
+            # Warn the user
+            warnings.warn(
+                f"Expert plan length {len(trajectory) - 1} exceeds max_plan_length {max_plan_length}. Truncating the plan."
+            )
+        else:
+            padding = np.full((num_states_to_pad, state_dim), padding_value, dtype=remaining_plan.dtype)
+            padded_plan = np.vstack([remaining_plan, padding]) if len(remaining_plan) > 0 else padding
+
+        y_list.append(padded_plan.flatten())
 
     return np.array(X_list), np.array(y_list)
 
 
 class XGBoostPlanner:
     """
-    A planner using a collection of XGBoost models to predict next states.
-    It uses scikit-learn's MultiOutputClassifier for convenience.
+    A planner using a collection of XGBoost models for direct multi-step REGRESSION.
     """
 
-    def __init__(self, encoding_type="bin", num_blocks: Optional[int] = None, seed=42, context_window_size: int = 1):
+    def __init__(
+        self,
+        encoding_type="bin",
+        num_blocks: Optional[int] = None,
+        seed=42,
+        context_window_size: int = 1,
+        max_plan_length: Optional[int] = None,
+    ):
         self.encoding_type = encoding_type
         self.num_blocks = num_blocks
         self.seed = seed
-        self.model = None
-        self.label_encoders = None  # For SAS+ encoding
+        self.context_window_size = context_window_size
+        self.max_plan_length = max_plan_length
 
-        if self.encoding_type == "bin":
-            self.context_window_size = context_window_size
-            # Multi-label classification problem
-            xgb_estimator = xgb.XGBClassifier(  # type: ignore
-                objective="binary:logistic", eval_metric="logloss", random_state=self.seed
-            )
-            self.model = MultiOutputClassifier(estimator=xgb_estimator, n_jobs=-1)
-        elif self.encoding_type == "sas":
-            if num_blocks is None:
-                raise ValueError("num_blocks must be provided for SAS+ encoding.")
-            self.context_window_size = context_window_size
-            # Multi-output classification problem
-            xgb_estimator = xgb.XGBClassifier(  # type: ignore
-                objective="multi:softprob", eval_metric="mlogloss", random_state=self.seed
-            )
-            self.model = MultiOutputClassifier(estimator=xgb_estimator, n_jobs=-1)
-            self.label_encoders = [LabelEncoder() for _ in range(num_blocks)]
-        else:
-            raise ValueError(f"Unsupported encoding type: {self.encoding_type}")
+        # Use XGBRegressor for both binary (0/1) and SAS+ (integer) targets.
+        xgb_estimator = xgb.XGBRegressor(objective="reg:squarederror", eval_metric="rmse", random_state=self.seed)
+        self.model = MultiOutputRegressor(estimator=xgb_estimator, n_jobs=-1)
 
     def train(self, X_train: np.ndarray, y_train: np.ndarray):
         """
-        Trains the multi-output XGBoost model.
+        Trains the multi-output XGBoost regression model.
         """
-        print(f"Training XGBoost model on data with shape X: {X_train.shape}, y: {y_train.shape}")
-
+        print(f"Training XGBoost REGRESSION model on data with shape X: {X_train.shape}, y: {y_train.shape}")
         if self.model is None:
             raise RuntimeError("Model must be initialized before training.")
 
-        if self.encoding_type == "sas":
-            y_transformed = np.zeros_like(y_train)
-
-            if self.num_blocks is None:
-                raise ValueError("num_blocks must be set for SAS+ encoding.")
-            if self.label_encoders is None:
-                raise ValueError("label_encoders must be initialized for SAS+ encoding.")
-
-            for i in range(self.num_blocks):
-                y_transformed[:, i] = self.label_encoders[i].fit_transform(y_train[:, i])
-            self.model.fit(X_train, y_transformed)
-
-        else:  # binary
-            self.model.fit(X_train, y_train)
+        # No special label handling is needed for regression.
+        self.model.fit(X_train, y_train)
 
         print("XGBoost model training complete.")
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """
-        Predicts the next state(s).
+        Predicts the next state(s) and rounds the result to the nearest integer.
         """
         if self.model is None:
             raise RuntimeError("Model has not been trained or loaded.")
 
-        y_pred = self.model.predict(X)
+        # Predict will return floating point values
+        y_pred_float = self.model.predict(X)
 
-        if self.encoding_type == "sas":
-            y_pred_original = np.zeros_like(y_pred)
+        # Round to the nearest integer and cast to int type
+        y_pred_rounded = np.round(y_pred_float).astype(int)  # type: ignore
 
-            if self.num_blocks is None:
-                raise ValueError("num_blocks must be set for SAS+ encoding.")
-            if self.label_encoders is None:
-                raise ValueError("label_encoders must be initialized for SAS+ encoding.")
-
-            for i in range(self.num_blocks):
-                y_pred_original[:, i] = self.label_encoders[i].inverse_transform(y_pred[:, i])  # type: ignore
-
-            return y_pred_original.astype(int)
-
-        return y_pred.astype(int)  # type: ignore
+        return y_pred_rounded
 
     def save(self, path: Path):
-        """Saves the trained model and label encoders to a file."""
+        """Saves the trained model to a file."""
         path.parent.mkdir(parents=True, exist_ok=True)
         save_data = {
             "model": self.model,
-            "label_encoders": self.label_encoders,
-            "encoding_type": self.encoding_type,  # Save these for robust loading
-            "num_blocks": self.num_blocks,  # Save these for robust loading
-            "context_window_size": self.context_window_size,  # Save new attribute
+            "encoding_type": self.encoding_type,
+            "num_blocks": self.num_blocks,
+            "context_window_size": self.context_window_size,
+            "max_plan_length": self.max_plan_length,
         }
         joblib.dump(save_data, path)
         print(f"XGBoost model saved to {path}")
@@ -147,24 +136,21 @@ class XGBoostPlanner:
         """Loads a model from a file."""
         if not path.is_file():
             raise FileNotFoundError(f"Model file not found at {path}")
-
         load_data = joblib.load(path)
 
-        # Retrieve parameters from saved data for initialization
-        # This makes loading more robust, as the init parameters are derived from the saved model
-        loaded_encoding_type = load_data.get("encoding_type", encoding_type)  # Fallback to passed arg for old models
-        loaded_num_blocks = load_data.get("num_blocks", num_blocks)  # Fallback to passed arg for old models
-        loaded_context_window_size = load_data.get("context_window_size", 1)  # Fallback to default for old models
+        loaded_encoding_type = load_data.get("encoding_type", encoding_type)
+        loaded_num_blocks = load_data.get("num_blocks", num_blocks)
+        loaded_context_window_size = load_data.get("context_window_size", 1)
+        loaded_max_plan_length = load_data.get("max_plan_length")
 
         instance = cls(
             encoding_type=loaded_encoding_type,
             num_blocks=loaded_num_blocks,
-            seed=seed,  # Seed is not saved, always passed
+            seed=seed,
             context_window_size=loaded_context_window_size,
+            max_plan_length=loaded_max_plan_length,
         )
-
         instance.model = load_data["model"]
-        instance.label_encoders = load_data["label_encoders"]
 
         print(f"XGBoost model loaded from {path}")
         return instance

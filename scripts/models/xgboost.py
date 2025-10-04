@@ -1,6 +1,6 @@
 import warnings
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 import joblib
 import numpy as np
@@ -10,59 +10,38 @@ from sklearn.multioutput import MultiOutputRegressor
 from ..pats_dataset import PaTSDataset
 
 
-def prepare_data_for_xgboost(
-    dataset: PaTSDataset, context_window_size: int, max_plan_length: int
-) -> Tuple[np.ndarray, np.ndarray]:
+def prepare_data_for_xgboost(dataset: PaTSDataset, context_window_size: int) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Flattens the dataset into a tabular format (X, y) for direct multi-step forecasting.
-    X = flatten(S_{t-k+1}, ..., S_t, S_G)
-    y = flatten(S_{t+1}, S_{t+2}, ..., S_Goal, <pad>, ..., <pad>)
-
-    The recommended setting for `max_plan_length` should be generous enough for the domain (e.g., 60 for 4 blocks).
+    Flattens the sequential dataset into a tabular format (X, y) for XGBoost, including a context window of past states.
+    X = (S_{t-k+1}, ..., S_t, S_G)
+    y = S_{t+1}
     """
     X_list, y_list = [], []
-    state_dim = dataset.state_dim
-
-    # Using a padding value that is unlikely to be a valid state feature, e.g., -99
-    # For SAS+, valid values are -1 to N. For binary, 0 or 1. -99 works for both.
-    padding_value = -99
-
     for i in range(len(dataset)):
         item = dataset[i]
         trajectory = item["expert_trajectory"]  # (L, F)
         goal_state = item["goal_state"]  # (F,)
         initial_state = item["initial_state"]  # (F,)
 
-        # We only need one training instance per plan: (S_0, S_G) -> (S_1, ..., S_Goal)
-        # Previous works (1) creates a sample from every possible window, but for planning, starting from S_0 is the most critical task.
-        # (1) Elsayed, Shereen, et al. "Do we really need deep learning models for time series forecasting?." arXiv preprint arXiv:2101.02118 (2021).
+        # Create (S_{t-k+1}, ..., S_t, S_G) -> S_{t+1} pairs
+        for t in range(len(trajectory) - 1):  # Iterate from S_0 to S_{L-2} to predict S_1 to S_{L-1}
+            # current_state = trajectory[t]
+            next_state = trajectory[t + 1]
 
-        # Build the context window for the initial state S_0
-        context_states = [initial_state] * context_window_size
+            # Build the context window for S_t
+            context_states = []
+            for j in range(context_window_size):
+                idx_in_traj = t - (context_window_size - 1 - j)
+                if idx_in_traj >= 0:
+                    context_states.append(trajectory[idx_in_traj])
+                else:
+                    # Pad with initial_state if not enough history
+                    context_states.append(initial_state)
 
-        # Create the input vector X
-        X_sample = np.concatenate(context_states + [goal_state])
-        X_list.append(X_sample)
-
-        # Create the output vector Y
-        remaining_plan = trajectory[1:]  # S_1, S_2, ... S_Goal
-
-        # Pad the remaining plan to max_plan_length
-        num_states_to_pad = max_plan_length - len(remaining_plan)
-
-        if num_states_to_pad < 0:
-            # If the expert plan is longer than our max, truncate it.
-            remaining_plan = remaining_plan[:max_plan_length]
-            padded_plan = remaining_plan
-            # Warn the user
-            warnings.warn(
-                f"Expert plan length {len(trajectory) - 1} exceeds max_plan_length {max_plan_length}. Truncating the plan."
-            )
-        else:
-            padding = np.full((num_states_to_pad, state_dim), padding_value, dtype=remaining_plan.dtype)
-            padded_plan = np.vstack([remaining_plan, padding]) if len(remaining_plan) > 0 else padding
-
-        y_list.append(padded_plan.flatten())
+            # Concatenate context states and goal state to form the feature vector X
+            X_sample = np.concatenate(context_states + [goal_state])
+            X_list.append(X_sample)
+            y_list.append(next_state)
 
     return np.array(X_list), np.array(y_list)
 

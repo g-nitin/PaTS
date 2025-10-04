@@ -1,11 +1,49 @@
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import joblib
 import numpy as np
 import xgboost as xgb
 from sklearn.multioutput import MultiOutputClassifier
 from sklearn.preprocessing import LabelEncoder
+
+from ..pats_dataset import PaTSDataset
+
+
+def prepare_data_for_xgboost(dataset: PaTSDataset, context_window_size: int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Flattens the sequential dataset into a tabular format (X, y) for XGBoost, including a context window of past states.
+    X = (S_{t-k+1}, ..., S_t, S_G)
+    y = S_{t+1}
+    """
+    X_list, y_list = [], []
+    for i in range(len(dataset)):
+        item = dataset[i]
+        trajectory = item["expert_trajectory"]  # (L, F)
+        goal_state = item["goal_state"]  # (F,)
+        initial_state = item["initial_state"]  # (F,)
+
+        # Create (S_{t-k+1}, ..., S_t, S_G) -> S_{t+1} pairs
+        for t in range(len(trajectory) - 1):  # Iterate from S_0 to S_{L-2} to predict S_1 to S_{L-1}
+            # current_state = trajectory[t]
+            next_state = trajectory[t + 1]
+
+            # Build the context window for S_t
+            context_states = []
+            for j in range(context_window_size):
+                idx_in_traj = t - (context_window_size - 1 - j)
+                if idx_in_traj >= 0:
+                    context_states.append(trajectory[idx_in_traj])
+                else:
+                    # Pad with initial_state if not enough history
+                    context_states.append(initial_state)
+
+            # Concatenate context states and goal state to form the feature vector X
+            X_sample = np.concatenate(context_states + [goal_state])
+            X_list.append(X_sample)
+            y_list.append(next_state)
+
+    return np.array(X_list), np.array(y_list)
 
 
 class XGBoostPlanner:

@@ -3,7 +3,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from pprint import pprint
-from typing import Tuple
 
 import numpy as np
 import torch
@@ -14,47 +13,10 @@ from scripts.models.lstm import PaTS_LSTM, lstm_collate_fn, train_lstm_model_loo
 from scripts.models.ttm import BlocksWorldTTM, determine_ttm_model
 from scripts.models.ttm import ModelConfig as TTMModelConfig
 from scripts.models.ttm import setup_logging as ttm_setup_logging
-from scripts.models.xgboost import XGBoostPlanner
+from scripts.models.xgboost import XGBoostPlanner, prepare_data_for_xgboost
 from scripts.pats_dataset import PaTSDataset
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
-
-
-def prepare_data_for_xgboost(dataset: PaTSDataset, context_window_size: int) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Flattens the sequential dataset into a tabular format (X, y) for XGBoost,
-    including a context window of past states.
-    X = (S_{t-k+1}, ..., S_t, S_G)
-    y = S_{t+1}
-    """
-    X_list, y_list = [], []
-    for i in range(len(dataset)):
-        item = dataset[i]
-        trajectory = item["expert_trajectory"]  # (L, F)
-        goal_state = item["goal_state"]  # (F,)
-        initial_state = item["initial_state"]  # (F,)
-
-        # Create (S_{t-k+1}, ..., S_t, S_G) -> S_{t+1} pairs
-        for t in range(len(trajectory) - 1):  # Iterate from S_0 to S_{L-2} to predict S_1 to S_{L-1}
-            # current_state = trajectory[t]
-            next_state = trajectory[t + 1]
-
-            # Build the context window for S_t
-            context_states = []
-            for j in range(context_window_size):
-                idx_in_traj = t - (context_window_size - 1 - j)
-                if idx_in_traj >= 0:
-                    context_states.append(trajectory[idx_in_traj])
-                else:
-                    # Pad with initial_state if not enough history
-                    context_states.append(initial_state)
-
-            # Concatenate context states and goal state to form the feature vector X
-            X_sample = np.concatenate(context_states + [goal_state])
-            X_list.append(X_sample)
-            y_list.append(next_state)
-
-    return np.array(X_list), np.array(y_list)
 
 
 def main():
@@ -248,6 +210,8 @@ def main():
         )
 
     if args.model_type == "lstm":
+        print("\nStarting XGBoost training setup...")
+
         train_dataloader = DataLoader(
             train_dataset,
             batch_size=args.batch_size,
@@ -290,8 +254,34 @@ def main():
             DEVICE,
         )
 
+    elif args.model_type == "xgboost":
+        print("\nStarting XGBoost training setup...")
+
+        # 1. Prepare data in tabular format
+        print("Preparing data for XGBoost...")
+        X_train, y_train = prepare_data_for_xgboost(train_dataset, args.xgboost_context_window_size)
+
+        if X_train.shape[0] == 0:
+            print("ERROR: No training data could be generated for XGBoost. Exiting.")
+            sys.exit(1)
+
+        # 2. Initialize and train the model
+        planner = XGBoostPlanner(
+            encoding_type=args.encoding_type,
+            num_blocks=args.num_blocks,
+            seed=args.seed,
+            context_window_size=args.xgboost_context_window_size,
+        )
+
+        planner.train(X_train, y_train)
+
+        # 3. Save the model
+        model_save_path = model_specific_output_dir / f"pats_xgboost_model_N{args.num_blocks}.joblib"
+        planner.save(model_save_path)
+        print("XGBoost training finished.")
+
     elif args.model_type == "ttm":
-        print("Starting TTM training setup...")
+        print("\nStarting TTM training setup...")
         ttm_log_file = model_specific_output_dir / f"ttm_training_N{args.num_blocks}.log"
         ttm_setup_logging(args.log_level, ttm_log_file)
 
@@ -362,32 +352,6 @@ def main():
         print(f"Saving TTM model assets to {final_model_assets_path}")
         ttm_trainer_instance.save(final_model_assets_path)
         print("TTM Training finished.")
-
-    elif args.model_type == "xgboost":
-        print("Starting XGBoost training setup...")
-
-        # 1. Prepare data in tabular format
-        print("Preparing data for XGBoost...")
-        X_train, y_train = prepare_data_for_xgboost(train_dataset, args.xgboost_context_window_size)
-
-        if X_train.shape[0] == 0:
-            print("ERROR: No training data could be generated for XGBoost. Exiting.")
-            sys.exit(1)
-
-        # 2. Initialize and train the model
-        planner = XGBoostPlanner(
-            encoding_type=args.encoding_type,
-            num_blocks=args.num_blocks,
-            seed=args.seed,
-            context_window_size=args.xgboost_context_window_size,
-        )
-
-        planner.train(X_train, y_train)
-
-        # 3. Save the model
-        model_save_path = model_specific_output_dir / f"pats_xgboost_model_N{args.num_blocks}.joblib"
-        planner.save(model_save_path)
-        print("XGBoost training finished.")
 
     else:
         print(f"Unknown model type: {args.model_type}")

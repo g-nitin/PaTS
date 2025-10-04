@@ -17,13 +17,18 @@ echo $CONDA_DEFAULT_ENV
 hostname
 echo "Python version: $(python --version)"
 
-num_blocks=5
-domain_name="blocksworld"
-encoding='sas' # `sas`, `bin`
-model_type='xgboost'  # `lstm`, `ttm`, `xgboost`, `llama`
-
-# If `model_type` == 'llama'
+num_blocks=$1
+encoding=$2
+model_type=$3
+domain_name=$4
 llama_model_id="meta-llama/Llama-3.1-8B-Instruct"
+
+echo "Running with:"
+echo "  Num Blocks: $num_blocks"
+echo "  Encoding: $encoding"
+echo "  Model Type: $model_type"
+echo "  Domain: $domain_name"
+echo ""
 
 # Generate timestamp once at the beginning of the script
 timestamp=$(date +%Y%m%d_%H%M%S)

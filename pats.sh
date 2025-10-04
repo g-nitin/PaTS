@@ -17,10 +17,10 @@ echo $CONDA_DEFAULT_ENV
 hostname
 echo "Python version: $(python --version)"
 
-num_blocks=4
+num_blocks=5
 domain_name="blocksworld"
 encoding='sas' # `sas`, `bin`
-model_type='lstm'  # `lstm`, `ttm`, `xgboost`, `llama`
+model_type='xgboost'  # `lstm`, `ttm`, `xgboost`, `llama`
 
 # If `model_type` == 'llama'
 llama_model_id="meta-llama/Llama-3.1-8B-Instruct"
@@ -43,6 +43,18 @@ mkdir -p "${benchmark_output_dir}"
 # Define log file paths
 train_log_file="${output_base_dir}/train_${model_type}_N${num_blocks}_${encoding}.log"
 benchmark_log_file="${benchmark_output_dir}/benchmark_${model_type}_N${num_blocks}_${encoding}.log"
+
+# Assuming MIN_BLOCKS_TO_GENERATE and MAX_BLOCKS_TO_GENERATE are typically the same
+# or that the script is run for a single num_blocks at a time.
+# The 'num_blocks' variable will hold the last value from the loop.
+MAX_PLAN_LENGTH_FILE="${RAW_BLOCK_DIR}/splits/max_plan_length.txt"
+dynamic_max_plan_length=60 # Default fallback value
+if [ -f "$MAX_PLAN_LENGTH_FILE" ]; then
+    read -r dynamic_max_plan_length < "$MAX_PLAN_LENGTH_FILE"
+    echo "Dynamically determined max plan length: $dynamic_max_plan_length"
+else
+    echo "Warning: max_plan_length.txt not found at ${MAX_PLAN_LENGTH_FILE}. Using default max_plan_length: 60." >&2
+fi
 
 if [ "$model_type" = 'lstm' ]; then
     echo "Using LSTM model"
@@ -76,7 +88,7 @@ if [ "$model_type" = 'lstm' ]; then
         --model_path "$model_path" \
         --output_dir "$benchmark_output_dir" \
         --encoding_type "$encoding" \
-        --max_plan_length 60 \
+        --max_plan_length "$dynamic_max_plan_length" \
         --save_detailed_results \
         > "${benchmark_log_file}" 2>&1 # Redirect stdout and stderr to log file
 
@@ -113,7 +125,7 @@ elif [ "$model_type" = 'ttm' ]; then
         --model_path "$model_path" \
         --output_dir "$benchmark_output_dir" \
         --encoding_type "$encoding" \
-        --max_plan_length 60 \
+        --max_plan_length "$dynamic_max_plan_length" \
         --save_detailed_results \
         > "${benchmark_log_file}" 2>&1
     
@@ -151,7 +163,7 @@ elif [ "$model_type" = 'xgboost' ]; then
         --model_path "$model_path" \
         --output_dir "$benchmark_output_dir" \
         --encoding_type "$encoding" \
-        --max_plan_length 60 \
+        --max_plan_length "$dynamic_max_plan_length" \
         --save_detailed_results \
         --xgboost_context_window_size 3 \
         > "${benchmark_log_file}" 2>&1
@@ -181,7 +193,7 @@ elif [ "$model_type" = 'llama' ]; then
         --model_path "$model_path" \
         --output_dir "$zero_shot_benchmark_output_dir" \
         --encoding_type "$encoding" \
-        --max_plan_length 60 \
+        --max_plan_length "$dynamic_max_plan_length" \
         --save_detailed_results \
         > "${zero_shot_benchmark_log_file}" 2>&1
 
@@ -204,7 +216,7 @@ elif [ "$model_type" = 'llama' ]; then
         --model_path "$model_path" \
         --output_dir "$few_shot_benchmark_output_dir" \
         --encoding_type "$encoding" \
-        --max_plan_length 60 \
+        --max_plan_length "$dynamic_max_plan_length" \
         --save_detailed_results \
         --xgboost_context_window_size 3 \
         --llama_use_few_shot \

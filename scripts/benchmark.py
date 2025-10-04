@@ -288,7 +288,7 @@ class XGBoostWrapper(PlannableModel):
         # Clip the predicted values to the valid SAS+ range [-1, num_blocks]
         # This prevents the model from predicting impossible positions (e.g., on top of block 6)
         unpadded_plan_steps = np.clip(unpadded_plan_steps, -1, self.num_blocks)
-        
+
         # 4. Construct the final plan starting with the initial state
         final_plan = [initial_state_np.tolist()]
         final_plan.extend(unpadded_plan_steps.tolist())  # type: ignore
@@ -457,7 +457,9 @@ def plot_benchmark_summary(
 
     fig, ax = plt.subplots(figsize=(10, 7))
     bars = ax.bar(
-        metrics_to_plot.keys(), metrics_to_plot.values(), color=sns.color_palette("viridis", len(metrics_to_plot))
+        metrics_to_plot.keys(),  # type: ignore
+        metrics_to_plot.values(),  # type: ignore
+        color=sns.color_palette("viridis", len(metrics_to_plot)),
     )
     ax.set_ylabel("Value")
     ax.set_title(f"Benchmark Summary for {model_type} (N={num_blocks}, Encoding={encoding_type})")
@@ -506,8 +508,8 @@ def plot_violation_distribution(
 
     for bar in bars.patches:
         bars.annotate(
-            f"{int(bar.get_height())}",
-            (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+            f"{int(bar.get_height())}",  # type: ignore
+            (bar.get_x() + bar.get_width() / 2, bar.get_height()),  # type: ignore
             ha="center",
             va="bottom",
             xytext=(0, 5),
@@ -595,7 +597,7 @@ def plot_timeseries_metrics_histograms(
         axes[1].set_ylabel("Frequency")
         axes[1].grid(axis="y", alpha=0.75)
 
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout to prevent suptitle overlap
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # type: ignore  # Adjust layout to prevent suptitle overlap
     plot_filename = f"timeseries_metrics_histograms_{model_type}_N{num_blocks}_{encoding_type}.png"
     plt.savefig(output_dir / plot_filename)
     plt.close()
@@ -619,8 +621,8 @@ def plot_trajectory_comparison(
     pred_np = np.array(predicted_plan)
     expert_np = expert_plan
 
-    max_len = max(pred_np.shape[0], expert_np.shape[0])
-    num_features = pred_np.shape[1] if pred_np.shape[0] > 0 else expert_np.shape[1]
+    # max_len = max(pred_np.shape[0], expert_np.shape[0])
+    # num_features = pred_np.shape[1] if pred_np.shape[0] > 0 else expert_np.shape[1]
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 8), sharey=True)
     fig.suptitle(f"Trajectory Comparison for {problem_basename} (N={num_blocks}, Encoding={encoding_type})", fontsize=16)
@@ -656,7 +658,7 @@ def plot_trajectory_comparison(
         axes[1].legend(loc="upper left", bbox_to_anchor=(1, 1))
         axes[1].set_ylim(-1.5, num_blocks + 0.5)
 
-    plt.tight_layout(rect=[0, 0.03, 0.9, 0.95])  # Adjust for suptitle and legends
+    plt.tight_layout(rect=[0, 0.03, 0.9, 0.95])  # type: ignore # Adjust for suptitle and legends
     plot_filename = f"trajectory_comparison_{model_type}_N{num_blocks}_{encoding_type}_{problem_basename}.png"
     plot_path = output_dir / "trajectory_plots" / plot_filename
     plot_path.parent.mkdir(parents=True, exist_ok=True)

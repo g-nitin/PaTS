@@ -107,6 +107,17 @@ def analyze_and_split_plans(dataset_dir, train_ratio=0.7, val_ratio=0.15, test_r
         return
 
     df = pd.DataFrame(plan_files_data)
+
+    # Calculate and save max plan length
+    if not df.empty:
+        max_plan_length = int(df["length"].max())
+        max_plan_length_path = splits_output_dir / "max_plan_length.txt"
+        with open(max_plan_length_path, "w") as f:
+            f.write(str(max_plan_length))
+        print(f"Max plan length ({max_plan_length}) saved to: {max_plan_length_path}")
+    else:
+        print("Warning: DataFrame is empty, cannot determine max plan length.")
+
     splits_output_dir.mkdir(parents=True, exist_ok=True)  # Ensure splits output directory exists
 
     # ** 1. Analyze Overall Plan Length Distribution **
@@ -344,7 +355,6 @@ def main():
     parser = argparse.ArgumentParser(
         description="Analyze plan length distribution and create stratified train/val/test splits."
     )
-# dataset_dir is now the RAW_BLOCK_DIR (e.g., data/raw_problems/blocksworld/N4)
     parser.add_argument(
         "raw_block_dir",
         type=Path,

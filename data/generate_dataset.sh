@@ -221,9 +221,7 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
     rm -f "$UNIQUE_HASHES_FILE" # Clean up temporary hash file
 
     # 5. Analyze dataset and create train-test splits
-    # Call to `analyze_dataset_splits.py` with arguments: 
-        # `dataset_dir`: Path to the root directory of the generated dataset (containing 'plans' subdirectory).
-        # `output_dir`: Directory to save the split files (train_files.txt, etc.) and distribution plots. This will be RAW_BLOCK_DIR/splits
+    # Call to `analyze_dataset_splits.py` with the argument `raw_block_dir`
     echo -e "\n"
     echo "Analyzing dataset splits for $num_blocks blocks..."
     uv run python "$ANALYZE_AND_SPLIT_SCRIPT" \

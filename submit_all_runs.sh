@@ -11,7 +11,7 @@ ENCODINGS_ARRAY=("sas" "bin")
 MODEL_TYPES_ARRAY=("lstm" "ttm" "xgboost" "llama")
 
 # Define the domain(s)
-DOMAIN_NAME="blocksworld"
+DOMAIN_NAME=("blocksworld")
 
 # Script Logic
 echo "Starting submission of PaTS jobs..."
@@ -19,16 +19,16 @@ echo "Starting submission of PaTS jobs..."
 # Create the logs directory if it doesn't exist
 mkdir -p logs
 
-sbatch pats.sh 4 "sas" "lstm" "blocksworld"
+sbatch pats.sh 4 "sas" "ttm" "blocksworld"
 sleep 1
 
-sbatch pats.sh 4 "bin" "lstm" "blocksworld"
+sbatch pats.sh 4 "bin" "ttm" "blocksworld"
 sleep 1
 
-sbatch pats.sh 5 "sas" "lstm" "blocksworld"
-sleep 1
+# sbatch pats.sh 5 "sas" "ttm" "blocksworld"
+# sleep 1
 
-sbatch pats.sh 5 "bin" "lstm" "blocksworld"
-sleep 1
+# sbatch pats.sh 5 "bin" "ttm" "blocksworld"
+# sleep 1
 
 echo "All PaTS jobs submitted."

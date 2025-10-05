@@ -32,14 +32,14 @@ DOMAIN_NAME="blocksworld"
 ENCODING_TYPE="sas"
 
 # MIN_BLOCKS & MAX_BLOCKS: Range of block numbers for problem generation
-MIN_BLOCKS_TO_GENERATE=5
-MAX_BLOCKS_TO_GENERATE=5
+MIN_BLOCKS_TO_GENERATE=3
+MAX_BLOCKS_TO_GENERATE=3
 
 # This will be the root for raw_problems and processed_trajectories
 BASE_DATA_DIR="./data"
 
 # PROBLEMS_PER_CONFIG: Number of problems to generate for each block count
-PROBLEMS_PER_CONFIG=10000
+PROBLEMS_PER_CONFIG=1000
 
 # FD_TIMEOUT: Timeout for Fast Downward (e.g., 60s, 5m)
 FD_TIMEOUT="60s"

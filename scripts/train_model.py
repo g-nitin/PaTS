@@ -166,8 +166,8 @@ def main():
     parser.add_argument(
         "--ttm_model_path",
         type=str,
-        default="ibm-granite/granite-timeseries-ttm-r2.1",
-        help="Base TTM model path from HuggingFace or local. Default is `ibm-granite/granite-timeseries-ttm-r2.1`",
+        default="ibm-granite/granite-timeseries-ttm-r2",
+        help="Base TTM model path from HuggingFace or local. Default is `ibm-granite/granite-timeseries-ttm-r2`",
     )
     parser.add_argument(
         "--context_length",
@@ -229,6 +229,11 @@ def main():
     except Exception as e:
         print(f"Error initializing PaTSDataset: {e}")
         sys.exit(1)
+
+    # Limit dataset for debugging
+    # train_dataset.basenames = train_dataset.basenames[:10]
+    # val_dataset.basenames = val_dataset.basenames[:5]
+    # print(f"~~~~~LIMITING DATASET FOR DEBUGGING~~~~~")
 
     if train_dataset.state_dim is None or train_dataset.state_dim <= 0:
         print(f"Could not determine num_features for {args.num_blocks} blocks from {args.dataset_dir}.")

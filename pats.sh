@@ -21,7 +21,6 @@ num_blocks=$1
 encoding=$2
 model_type=$3
 domain_name=$4
-llama_model_id="meta-llama/Llama-3.1-8B-Instruct"
 
 echo "Running with:"
 echo "  Num Blocks: $num_blocks"
@@ -178,8 +177,9 @@ elif [ "$model_type" = 'xgboost' ]; then
 
 elif [ "$model_type" = 'llama' ]; then
     echo "Using Llama model"
+
     # For Llama, model_path will be the model_id directly, as it's not a local file path
-    model_path="$llama_model_id"
+    model_path="meta-llama/Llama-3.1-8B-Instruct"
 
     # 1. Benchmark Zero-shot Llama 
     echo "\n"

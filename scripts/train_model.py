@@ -13,7 +13,6 @@ from transformers.trainer_utils import set_seed as ttm_set_seed
 from scripts.models.lstm import PaTS_LSTM, lstm_collate_fn, train_lstm_model_loop
 from scripts.models.ttm import BlocksWorldTTM, determine_ttm_model
 from scripts.models.ttm import ModelConfig as TTMModelConfig
-from scripts.models.ttm import setup_logging as ttm_setup_logging
 from scripts.models.xgboost import XGBoostPlanner
 from scripts.pats_dataset import PaTSDataset
 
@@ -168,7 +167,7 @@ def main():
         "--ttm_model_path",
         type=str,
         default="ibm-granite/granite-timeseries-ttm-r2.1",
-        help="Base TTM model path from HuggingFace or local. Default is 'ibm-granite/granite-timeseries-ttm-r2.1'.",
+        help="Base TTM model path from HuggingFace or local. Default is `ibm-granite/granite-timeseries-ttm-r2.1`",
     )
     parser.add_argument(
         "--context_length",
@@ -318,8 +317,6 @@ def main():
 
     elif args.model_type == "ttm":
         print("Starting TTM training setup...")
-        ttm_log_file = model_specific_output_dir / f"ttm_training_N{args.num_blocks}.log"
-        ttm_setup_logging(args.log_level, ttm_log_file)
 
         max_plan_len_in_train_data = 0
         if len(train_dataset.basenames) > 0:

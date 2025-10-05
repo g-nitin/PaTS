@@ -2,14 +2,13 @@ import json
 import math
 import posixpath
 import re
-import sys
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path, PosixPath
 from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
-from loguru import logger
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import Dataset  # Used for type hinting, PaTSDataset will be the actual one
@@ -22,8 +21,9 @@ from tsfm_public.toolkit.get_model import get_model  # type: ignore
 
 from ..pats_dataset import PaTSDataset
 
-# ** Constants **
+# Constants
 DEFAULT_TTM_MODEL_PATH = "ibm-granite/granite-timeseries-ttm-r2.1"  # Default TTM model
+
 # Define the supported models based on the provided combinations: https://huggingface.co/ibm-granite/granite-timeseries-ttm-r2/tree/main
 SUPPORTED_MODELS = [
     {"context_length": 52, "prediction_length": 16, "freq_tuning": True, "loss_metric": "mse", "release": "r2.1"},
@@ -128,6 +128,20 @@ class TTMDataCollator:
             goal_state_np_orig = item["goal_state"]  # (F,), 0/1
             initial_state_np_orig = item["initial_state"]  # (F,), 0/1
 
+            # Calculate scaling statistics from the original, full trajectory
+            # We use the full trajectory to get a stable estimate of the instance's distribution.
+            mean = np.mean(plan_states_np_orig, axis=0)
+            std = np.std(plan_states_np_orig, axis=0)
+            # Add a small epsilon to prevent division by zero for constant features
+            std[std == 0] = 1e-6
+
+            # Define a scaling function
+            def scale(data):
+                return (data - mean) / std
+
+            # Scale the goal state using the trajectory's statistics
+            scaled_goal_state = scale(goal_state_np_orig)
+
             past_values_np = np.zeros((self.context_length, self.state_dim), dtype=np.float32)
             past_observed_mask_np = np.zeros((self.context_length, self.state_dim), dtype=np.float32)
 
@@ -174,13 +188,11 @@ class TTMDataCollator:
                 future_values_np[len_to_copy_to_future:] = padding_values
                 future_observed_mask_np[len_to_copy_to_future:, :] = 1.0
 
-            static_categorical_values_np = goal_state_np_orig.copy()
-
-            list_past_values_processed.append(self._process_values(past_values_np))
-            list_future_values_processed.append(self._process_values(future_values_np))
+            list_past_values_processed.append(scale(past_values_np))
+            list_future_values_processed.append(scale(future_values_np))
             list_past_observed_mask.append(past_observed_mask_np)
             list_future_observed_mask.append(future_observed_mask_np)
-            list_static_categorical_processed.append(self._process_values(static_categorical_values_np))
+            list_static_categorical_processed.append(scaled_goal_state)
 
         # Stack and convert to tensors. Trainer will move to device.
         return {
@@ -208,7 +220,7 @@ class BlocksWorldTTM:
         if self.config.state_dim is None:
             self.config.state_dim = train_dataset.state_dim
         if self.config.encoding_type != train_dataset.encoding_type:
-            logger.warning(
+            warnings.warn(
                 f"ModelConfig encoding_type ({self.config.encoding_type}) differs from train_dataset encoding_type ({train_dataset.encoding_type}). Using dataset's type."
             )
             self.config.encoding_type = train_dataset.encoding_type
@@ -220,8 +232,8 @@ class BlocksWorldTTM:
         train_dataset,
         val_dataset: Optional[Dataset] = None,
     ):
-        logger.info("Starting model training...")
-        logger.info(f"Initializing TTM model from: {self.config.ttm_model_path}")
+        print("Starting model training...")
+        print(f"Initializing TTM model from: {self.config.ttm_model_path}")
         self._ensure_config_consistency(train_dataset)  # Call new consistency check
 
         get_model_params = {
@@ -234,8 +246,9 @@ class BlocksWorldTTM:
 
         # Find model name key for logging
         get_model_params["return_model_key"] = True
+
         self.model_name = str(get_model(**get_model_params))  # Ensure it's string
-        logger.info(f"Base TTM model key: {self.model_name}")
+        print(f"Base TTM model key: {self.model_name}")
 
         training_args = TrainingArguments(
             output_dir=posixpath.join(self.output_dir, "training_output"),
@@ -293,9 +306,9 @@ class BlocksWorldTTM:
             optimizers=(optimizer, scheduler),  # type: ignore
         )
 
-        logger.info("Trainer initialized. Starting training...")
+        print("Trainer initialized. Starting training...")
         self.trainer.train()
-        logger.info("Training finished.")
+        print("Training finished.")
 
     def predict(self, context_sequence: torch.Tensor, goal_states: torch.Tensor) -> torch.Tensor:
         """
@@ -318,43 +331,45 @@ class BlocksWorldTTM:
         with torch.no_grad():
             batch_size = context_sequence.shape[0]
 
-            # Process inputs based on encoding type
-            if self.config.encoding_type == "bin":
-                # Scale 0/1 to -1/1 for binary
-                context_sequence_processed = context_sequence.to(self.device) * 2.0 - 1.0
-                goal_states_processed = goal_states.to(self.device) * 2.0 - 1.0
-            elif self.config.encoding_type == "sas":
-                # For SAS+, inputs are integer types from PaTSDataset, cast to float.
-                # No scaling, as TTM expects continuous values for regression.
-                context_sequence_processed = context_sequence.to(self.device).float()
-                goal_states_processed = goal_states.to(self.device).float()
-            else:
-                raise ValueError(f"Unsupported encoding type: {self.config.encoding_type}")
+            # Calculate scaling stats from the input context (on the correct device)
+            mean = torch.mean(context_sequence, dim=1, keepdim=True)
+            std = torch.std(context_sequence, dim=1, keepdim=True)
+            std[std == 0] = 1e-6  # Prevent division by zero
+
+            # Define scaling and unscaling functions
+            def scale(data):
+                return (data - mean) / std
+
+            def unscale(data):
+                return (data * std) + mean
+
+            # Process inputs based on encoding type using the new scaling
+            context_sequence_processed = scale(context_sequence.to(self.device).float())
+
+            # For goal states, expand mean/std to match its shape before scaling
+            goal_states_processed = (goal_states.to(self.device).float() - mean.squeeze(1)) / std.squeeze(1)
 
             inputs = {
                 "past_values": context_sequence_processed,
                 "past_observed_mask": torch.ones_like(context_sequence_processed).to(self.device),
-                "static_categorical_values": goal_states_processed,  # Goal states are static features
+                "static_categorical_values": goal_states_processed,
                 "freq_token": torch.zeros(batch_size, dtype=torch.long).to(self.device),
             }
 
             outputs = self.model(**inputs)
             raw_predictions = outputs[0]  # Shape: (batch_size, prediction_length, num_features)
 
-            # Convert raw predictions back to original encoding's format
+            # Unscale the raw predictions before converting to discrete format
+            # We need to expand the mean/std to match the prediction shape (B, P, F)
+            unscaled_predictions = unscale(raw_predictions)
+
             if self.config.encoding_type == "bin":
-                predictions_tanh = torch.tanh(raw_predictions)
-                # Hard binarization to -1/1
-                predictions_scaled_binary = torch.where(
-                    predictions_tanh > 0, torch.tensor(1.0, device=self.device), torch.tensor(-1.0, device=self.device)
-                )
-                # Convert back from -1/1 to 0/1
-                final_predictions = (predictions_scaled_binary + 1.0) / 2.0
+                # Binarize the *unscaled* predictions
+                final_predictions = (unscaled_predictions > 0.5).float()
             elif self.config.encoding_type == "sas":
-                # For SAS+, round to nearest integer and clamp to valid range [-1, num_blocks]
-                # Valid SAS+ values: -1 (held), 0 (table), 1..num_blocks (on b1..bN)
-                max_valid_sas_value = self.config.num_blocks  # Needs to be defined based on N
-                final_predictions = torch.round(raw_predictions).clamp(min=-1, max=max_valid_sas_value).long()
+                # Round and clamp the *unscaled* predictions
+                max_valid_sas_value = self.config.num_blocks
+                final_predictions = torch.round(unscaled_predictions).clamp(min=-1, max=max_valid_sas_value).long()
             else:
                 raise ValueError(f"Unsupported encoding type: {self.config.encoding_type}")
 
@@ -373,12 +388,12 @@ class BlocksWorldTTM:
         with open(config_path, "w") as f:
             json.dump(asdict(self.config), f, indent=4)
 
-        logger.info(f"Model and config saved to {path}")
+        print(f"Model and config saved to {path}")
 
     @classmethod
     def load(cls, path: Path, device: torch.device) -> "BlocksWorldTTM":
         """Load model weights and configuration"""
-        logger.info(f"Loading model from {path}")
+        print(f"Loading model from {path}")
         config_path = path / "config.json"
         if not config_path.is_file():
             raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -394,8 +409,8 @@ class BlocksWorldTTM:
         try:
             loaded_model_config = ModelConfig(**config_dict)
         except TypeError as e:
-            logger.error(f"Error loading ModelConfig from {config_path}. Missing fields or mismatch: {e}")
-            logger.error(f"Loaded config_dict: {config_dict}")
+            warnings.warn(f"Error loading ModelConfig from {config_path}. Missing fields or mismatch: {e}")
+            warnings.warn(f"Loaded config_dict: {config_dict}")
             raise
 
         if loaded_model_config.state_dim is None:
@@ -427,33 +442,13 @@ class BlocksWorldTTM:
         except Exception:  # Fallback if model key cannot be determined (e.g., local path)
             instance.model_name = Path(instance.config.ttm_model_path).name
 
-        logger.info(f"Model loaded successfully from {path}. Base TTM: {instance.model_name}")
+        print(f"Model loaded successfully from {path}. Base TTM: {instance.model_name}")
         return instance
-
-
-# ** Helper Functions **
-def setup_logging(level="INFO", log_file: Optional[Path] = None):
-    logger.remove()  # Remove default handler
-    logger.add(
-        sys.stderr,
-        level=level.upper(),
-        colorize=True,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
-    )
-    if log_file:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        logger.add(
-            log_file,
-            rotation="10 MB",
-            level="DEBUG",  # Log DEBUG to file
-            format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
-        )
-    logger.info(f"Logging setup complete. Level: {level}. File: {log_file}")
 
 
 def load_problem_basenames_from_split_file(split_file_path: Path) -> List[str]:
     if not split_file_path.exists():
-        logger.warning(f"Split file not found: {split_file_path}")
+        warnings.warn(f"Split file not found: {split_file_path}")
         return []
     with open(split_file_path, "r") as f:
         basenames = [line.strip() for line in f if line.strip() and not line.startswith("#")]
@@ -500,14 +495,14 @@ def determine_ttm_model(
         candidates = [m for m in candidates if m["release"] == user_release]
 
     if not candidates:
-        logger.warning("No models match the specified user overrides.")
+        warnings.warn("No models match the specified user overrides.")
         return None
 
     # 2. Filter by max_plan_length
     valid_candidates = [m for m in candidates if m["context_length"] <= max_plan_length]
     if not valid_candidates:
         min_supported_cl = min(m["context_length"] for m in candidates)
-        logger.warning(
+        warnings.warn(
             f"Max plan length ({max_plan_length}) is smaller than all supported context lengths for the current selection. "
             f"Considering models with the smallest supported context length: {min_supported_cl}."
         )
@@ -525,20 +520,18 @@ def determine_ttm_model(
     else:
         # Otherwise, choose the smallest available prediction length
         best_pl = min(m["prediction_length"] for m in valid_candidates)
-        logger.warning(
+        warnings.warn(
             f"Recommended prediction length ({recommended_prediction_length}) is smaller than all supported forecast lengths. "
             f"Choosing the smallest supported: {best_pl}."
         )
         final_candidates = [m for m in valid_candidates if m["prediction_length"] == best_pl]
 
-    logger.info(
-        f"Recommended prediction length: {recommended_prediction_length} | Auto-selected prediction_length: {best_pl}"
-    )
+    print(f"Recommended prediction length: {recommended_prediction_length} | Auto-selected prediction_length: {best_pl}")
 
     # 4. Select the one with the largest context_length from the finalists
     best_cl = max(m["context_length"] for m in final_candidates)
     final_candidates = [m for m in final_candidates if m["context_length"] == best_cl]
-    logger.info(f"Max plan length: {max_plan_length} | Auto-selected context_length: {best_cl}")
+    print(f"Max plan length: {max_plan_length} | Auto-selected context_length: {best_cl}")
 
     # 5. Tie-break if multiple models remain
     # Sort by: freq_tuning (True first), loss_metric ('mae' first), release (e.g., 'r2.1' > 'r2')
@@ -546,8 +539,8 @@ def determine_ttm_model(
 
     selected_model = final_candidates[0]
 
-    logger.info(f"Selected model configuration: {selected_model}")
-    logger.info(f"Model path: {get_model_path(selected_model)}")
+    print(f"Selected model configuration: {selected_model}")
+    print(f"Model path: {get_model_path(selected_model)}")
 
     return selected_model
 

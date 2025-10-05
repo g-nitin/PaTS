@@ -233,7 +233,7 @@ def main():
     # Limit dataset for debugging
     # train_dataset.basenames = train_dataset.basenames[:10]
     # val_dataset.basenames = val_dataset.basenames[:5]
-    # print(f"~~~~~LIMITING DATASET FOR DEBUGGING~~~~~")
+    # print("~~~~~LIMITING DATASET FOR DEBUGGING~~~~~")
 
     if train_dataset.state_dim is None or train_dataset.state_dim <= 0:
         print(f"Could not determine num_features for {args.num_blocks} blocks from {args.dataset_dir}.")

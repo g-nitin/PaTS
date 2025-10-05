@@ -328,9 +328,12 @@ class BlocksWorldTTM:
         with torch.no_grad():
             batch_size = context_sequence.shape[0]
 
+            # Cast the integer tensor to float before calculating statistics
+            context_sequence_float = context_sequence.float()
+
             # Calculate scaling stats from the input context (on the correct device)
-            mean = torch.mean(context_sequence, dim=1, keepdim=True)
-            std = torch.std(context_sequence, dim=1, keepdim=True)
+            mean = torch.mean(context_sequence_float, dim=1, keepdim=True)
+            std = torch.std(context_sequence_float, dim=1, keepdim=True)
             std[std == 0] = 1e-6  # Prevent division by zero
 
             # Define scaling and unscaling functions
@@ -341,7 +344,7 @@ class BlocksWorldTTM:
                 return (data * std) + mean
 
             # Process inputs based on encoding type using the new scaling
-            context_sequence_processed = scale(context_sequence.to(self.device).float())
+            context_sequence_processed = scale(context_sequence_float.to(self.device).float())
 
             # For goal states, expand mean/std to match its shape before scaling
             goal_states_processed = (goal_states.to(self.device).float() - mean.squeeze(1)) / std.squeeze(1)

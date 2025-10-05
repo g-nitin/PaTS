@@ -25,10 +25,10 @@ sleep 1
 sbatch pats.sh 4 "bin" "ttm" "blocksworld"
 sleep 1
 
-# sbatch pats.sh 5 "sas" "ttm" "blocksworld"
-# sleep 1
+sbatch pats.sh 5 "sas" "ttm" "blocksworld"
+sleep 1
 
-# sbatch pats.sh 5 "bin" "ttm" "blocksworld"
-# sleep 1
+sbatch pats.sh 5 "bin" "ttm" "blocksworld"
+sleep 1
 
 echo "All PaTS jobs submitted."

@@ -6,6 +6,8 @@ data/processed_trajectories/
 data/raw_problems/
 data/*.zip
 data/regenerate_missing_trajectories.sh
+data/check_dataset_uniqueness.py
+data/generate_dataset.sh
 
 outputs/
 own/
@@ -17,5 +19,6 @@ training_outputs/
 benchmark_results/
 slurm/*
 local-run.sh
+local-submit_all_runs.sh
 
 **/__pycache__/

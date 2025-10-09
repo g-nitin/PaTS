@@ -299,11 +299,6 @@ def main():
         help="Prefix for saving binary encoded state trajectory and goal state (.npy). E.g., 'data/processed_trajectories/blocksworld/N4/bin/blocks_4_problem_1'",
     )
     parser.add_argument(
-        "--raw_data_dir",
-        required=True,
-        help="Root directory for raw problem data (e.g., data/raw_problems/blocksworld/N4) where encoding_info and manifest files are saved.",
-    )
-    parser.add_argument(
         "--encoding_type",
         type=str,
         choices=["bin", "sas"],
@@ -319,39 +314,35 @@ def main():
     try:
         # Generate block names once
         block_names = [f"b{i + 1}" for i in range(args.num_blocks)]
-        raw_data_path = Path(args.raw_data_dir)  # Use raw_data_dir for manifest/info
+        processed_dir = Path(args.binary_output_prefix).parent
 
         # 1. Generate encoding-specific information
+        processed_dir.mkdir(parents=True, exist_ok=True) # Ensure destination exists
         if args.encoding_type == "bin":
             ordered_master_pred_list = get_ordered_predicate_list(args.num_blocks, block_names_prefix="b")
             if not ordered_master_pred_list:
                 print(f"ERROR: Could not generate master predicate list for {args.num_blocks} blocks.")
                 exit(1)
 
-            # Save the predicate manifest
-            raw_data_path.mkdir(parents=True, exist_ok=True)  # Ensure it exists
-            manifest_file_path = raw_data_path / f"predicate_manifest_{args.num_blocks}.txt"
-
-            raw_data_path.mkdir(parents=True, exist_ok=True)  # Ensure it exists
-            manifest_file_path = raw_data_path / f"predicate_manifest_{args.num_blocks}.txt"
+            # Save the predicate manifest to the processed directory
+            manifest_file_path = processed_dir / "predicate_manifest.txt"
             with open(manifest_file_path, "w") as f_manifest:
                 for pred_item in ordered_master_pred_list:
                     f_manifest.write(f"{pred_item}\n")
             print(f"    INFO: Predicate manifest saved to: {manifest_file_path}")
             encoding_info = {
                 "type": "bin",
-                "manifest_file": str(manifest_file_path.name),
+                "manifest_file": "predicate_manifest.txt", # Use relative name
                 "feature_dim": len(ordered_master_pred_list),
             }
         elif args.encoding_type == "sas":
-            # For SAS, the "manifest" is just the number of blocks.
             ordered_master_pred_list = None  # Not used for SAS
             encoding_info = {"type": "sas", "feature_dim": args.num_blocks, "block_order": block_names}
         else:
             raise ValueError(f"Unknown encoding type: {args.encoding_type}")
 
-        # Save the encoding info file
-        encoding_info_path = raw_data_path / f"encoding_info_{args.num_blocks}.json"
+        # Save the encoding info file to the processed directory
+        encoding_info_path = processed_dir / "encoding_info.json"
         with open(encoding_info_path, "w") as f_info:
             json.dump(encoding_info, f_info, indent=4)
         print(f"    INFO: Encoding info saved to: {encoding_info_path}")

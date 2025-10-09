@@ -797,7 +797,7 @@ def run_benchmark(args: argparse.Namespace):
 
     validator = None
     try:
-        validator = BlocksWorldValidator(num_blocks, args.encoding_type, raw_data_dir=raw_block_dir)
+        validator = BlocksWorldValidator(num_blocks, args.encoding_type, processed_data_dir=processed_block_encoding_dir)
         print(f"Validator initialized with state_size={validator.state_size}.")
     except Exception as e:
         print(f"ERROR: Failed to initialize BlocksWorldValidator: {e}")

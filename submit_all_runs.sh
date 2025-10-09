@@ -2,7 +2,7 @@
 
 # Configuration for runs
 # Define the number of blocks to test
-NUM_BLOCKS_ARRAY=(4 5)
+NUM_BLOCKS_ARRAY=(3 4 5)
 
 # Define the encoding types to test
 ENCODINGS_ARRAY=("sas" "bin")

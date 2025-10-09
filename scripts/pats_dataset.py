@@ -21,7 +21,7 @@ class PaTSDataset(Dataset):
         """
         Initializes the PaTSDataset.
 
-        :param raw_data_dir: The root directory for raw problem data for a specific N (e.g., 'data/raw_problems/blocksworld/N4/'). This is where split files (train_files.txt) and encoding_info.json are located.
+        :param raw_data_dir: The root directory for raw problem data for a specific N (e.g., 'data/raw_problems/blocksworld/N4/'). This is where split files (train_files.txt) are located.
         :param processed_data_dir: The root directory for processed, encoded trajectories for a specific N and encoding (e.g., 'data/processed_trajectories/blocksworld/N4/bin/').
         :param split_file_name: The name of the file containing problem basenames for this split (e.g., 'train_files.txt' or 'val_files.txt').
         :param encoding_type: The encoding of the data to load ('bin' or 'sas').

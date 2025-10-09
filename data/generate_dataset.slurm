@@ -22,11 +22,11 @@ module use "$HOME/privatemodules"
 module load conda-env/pats-py3.12.8
 conda activate pats
 
-DOMAIN_NAME="blocksworld"     # Name of the planning domain
-ENCODING_TYPES=("bin" "sas")  # The state encodings to use
-PROBLEMS_PER_CONFIG=100000    # Number of problems to generate for each block count
-MIN_BLOCKS_TO_GENERATE=6      # MIN block numbers for problem generation
-MAX_BLOCKS_TO_GENERATE=6      # MAX block numbers for problem generation
+DOMAIN_NAME="blocksworld"          # Name of the planning domain
+ENCODING_TYPES=("bin" "sas")       # The state encodings to use
+PROBLEMS_PER_CONFIG=$((1000*300))  # Number of problems to generate for each block count
+MIN_BLOCKS_TO_GENERATE=6           # MIN block numbers for problem generation
+MAX_BLOCKS_TO_GENERATE=6           # MAX block numbers for problem generation
 
 ROOT_DIR="$HOME/planning/"                                                     # Base directory for all planning related tools and files
 DOMAIN_FILE="${ROOT_DIR}pddl-generators/blocksworld/4ops/domain.pddl"          # Path to the PDDL domain file

@@ -1,4 +1,4 @@
-## Workflow
+## Workflow and Core Components
 
 The typical workflow for using PaTS is:
 
@@ -49,6 +49,8 @@ The typical workflow for using PaTS is:
 
 ## Key Scripts and Components
 
+This directory contains the core logic for training, evaluating, and validating PaTS models.
+
 - **`train_model.py`**: The **central script for training** PaTS models (LSTM, TTM, XGBoost). It handles dataset loading, model instantiation, and training loops.
 - **`benchmark.py`**: The **central script for evaluating** all trained or pre-trained PaTS models. It uses a standardized `PlannableModel` interface to interact with different models, generates plans for test problems, and computes a rich set of performance metrics.
 - **`pats_dataset.py`**: A unified PyTorch `Dataset` class that loads pre-encoded trajectories and goals based on the specified encoding type.
@@ -62,12 +64,29 @@ The typical workflow for using PaTS is:
 
 ## Benchmarking and Evaluation Metrics
 
-The `benchmark.py` script computes a wide range of metrics to provide a holistic view of a model's planning capabilities, including:
+The `benchmark.py` script provides a comprehensive evaluation of a model's planning capabilities. It computes a wide range of metrics, categorized as follows:
 
 - **`solved_rate_strict`**: The percentage of problems where the generated plan is fully valid _and_ achieves the exact goal state. This is the primary measure of success.
 - **`valid_sequence_rate`**: The percentage of plans that are physically and transitionally valid, regardless of goal achievement.
 - **`goal_achievement_rate`**: The percentage of plans that end in the correct goal state, regardless of validity.
-- **Plan Optimality Metrics**: Compares the length of solved plans to expert plans (`avg_plan_length_ratio_for_solved`).
-- **Partial Success Metrics**: Measures partial goal satisfaction (`avg_goal_f1_score`) and the percentage of valid states/transitions within a plan.
-- **Time-Series Metrics**: `dtw_distance` and `mean_per_step_hamming_dist` measure the similarity of the predicted trajectory to the expert trajectory.
-- **`violation_code_counts`**: A frequency count of different error types, useful for debugging and model analysis.
+- **Plan Optimality Metrics**:
+  - `avg_plan_length_ratio_for_solved`: The average ratio of the predicted plan length to the expert plan length, calculated only for strictly solved problems. A value close to 1 indicates optimality.
+  - `avg_plan_length_diff_for_solved`: The average difference in plan length (predicted - expert) for strictly solved problems.
+- **Partial Success Metrics**:
+  - `avg_goal_jaccard_score` / `avg_goal_f1_score`: Measures the similarity between the final predicted state and the true goal state, useful for assessing partial goal satisfaction.
+  - `avg_percent_physically_valid_states`: The average percentage of states within a generated plan that satisfy physical constraints.
+  - `avg_percent_valid_transitions`: The average percentage of transitions within a generated plan that are legal.
+- **Time-Series Metrics**: These metrics quantify the similarity between the _entire predicted trajectory_ and the expert trajectory.
+  - `dtw_distance`: Dynamic Time Warping distance, a robust measure of similarity between two time series that may vary in speed or length.
+  - `mean_per_step_hamming_dist`: The average Hamming distance (number of differing features) between predicted and expert states at each corresponding time step.
+- **`violation_code_counts`**: A frequency count of different error types (e.g., `PHYS_BLOCK_FLOATING`, `TRANS_ILLEGAL_CHANGES`), useful for debugging and model analysis.
+
+## Visualizations
+
+The `benchmark.py` script automatically generates several plots to visualize the evaluation results, saved to the `--output_dir`:
+
+- **Benchmark Summary**: Bar chart of key aggregated metrics (solved rate, valid rate, goal achievement, etc.).
+- **Violation Distribution**: Bar chart showing the frequency of different plan violation types.
+- **Plan Length Histograms**: Histograms comparing the distribution of predicted plan lengths against expert plan lengths.
+- **Time-Series Metrics Histograms**: Histograms for DTW and Hamming distances.
+- **Trajectory Comparison Plots**: For a limited number of solved problems, visual comparisons of predicted vs. expert state trajectories (heatmaps for binary, line plots for SAS+).

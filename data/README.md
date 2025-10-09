@@ -8,23 +8,29 @@ The dataset generation process is designed for efficiency and scalability. It fo
 
 The `data/generate_dataset.sh` script automates this entire pipeline:
 
-1.  **Stage 1: Encoding-Agnostic Generation (The Heavy Lifting)**
-    *   **Problem Generation**: Creates PDDL problem files (`.pddl`) using a domain-specific generator. Here we call to the [pddl-generators](https://github.com/AI-Planning/pddl-generators/tree/main) repository.
-    *   **Plan Generation**: Uses the [Fast Downward planner](https://github.com/aibasel/downward) to find an optimal solution (`.plan`) for each problem. Problems that cannot be solved within the time limit are discarded.
-    *   **Plan Validation**: Uses [VAL](https://github.com/KCL-Planning/VAL) to validate the generated plan and produce a verbose log of all state changes (`.val.log`). Invalid plans result in the problem being discarded.
+1.  **Stage 1: Encoding-Agnostic Generation (The Heavy Lifting)** This initial stage performs computationally intensive tasks that are independent of the final numerical state encoding.
 
-2.  **Stage 2: State Trajectory Extraction**
-    *   The `data/parse_and_encode.py` script is called for the first time to process the VAL log and reconstruct the full sequence of states in a human-readable text format (`.traj.txt`). This text-based trajectory becomes the single source of truth for a given problem.
+    - **Problem Generation**: Creates PDDL problem files (`.pddl`) using a domain-specific generator. Here we call to the [pddl-generators](https://github.com/AI-Planning/pddl-generators/tree/main) repository.
+    - **Plan Generation**: Uses the [Fast Downward planner](https://github.com/aibasel/downward) to find an optimal solution (`.plan`) for each problem. Problems that cannot be solved within the time limit are discarded.
+    - **Plan Validation**: Uses [VAL](https://github.com/KCL-Planning/VAL) to validate the generated plan and produce a verbose log of all state changes (`.val.log`). Invalid plans result in the problem being discarded.
+
+2.  **Stage 2: State Trajectory Extraction (Text Format)**
+
+    - The `data/parse_and_encode.py` script is invoked to process the verbose VAL log (`.val.log`) and reconstruct the full sequence of states from the initial state to the goal state. This sequence is saved in a human-readable text format (`.traj.txt`). This text-based trajectory serves as a canonical, encoding-agnostic representation for a given problem.
 
 3.  **Stage 3: Uniqueness Filtering**
-    *   To prevent data leakage between training and test sets, a unique hash is generated for each (initial state, goal state) pair. If a newly generated problem is a duplicate of one already processed, it is discarded.
 
-4.  **Stage 4: Multi-Encoding Processing**
-    *   The script then **loops through all desired encoding types** (e.g., `bin`, `sas`).
-    *   For each encoding, it re-invokes `data/parse_and_encode.py`. The script reads the intermediate text trajectory and converts it into the specified numerical vector format, saving the results as NumPy arrays (`.npy`). This step is very fast as it involves no planning or simulation.
+    - To prevent data leakage between training and test sets, a unique hash is generated for each (initial state, goal state) pair. If a newly generated problem is a duplicate of one already processed, it is discarded.
+
+4.  **Stage 4: Multi-Encoding Processing (Numerical Conversion)**
+
+    - The script then **loops through all desired encoding types** (e.g., `bin`, `sas`).
+
+    - For each encoding, `data/parse_and_encode.py` is called _again_. This time, it reads the intermediate text trajectory (`.traj.txt`) and converts it into the specified numerical vector format, saving the results as NumPy arrays (`.npy`). This step is computationally inexpensive as it only involves data transformation.
 
 5.  **Stage 5: Dataset Splitting**
-    *   Finally, `data/analyze_dataset_splits.py` analyzes the distribution of plan lengths across all successfully generated unique problems. It then creates stratified `train_files.txt`, `val_files.txt`, and `test_files.txt`, ensuring that all instances of a unique (initial, goal) pair are kept within the same split.
+    - Finally, `data/analyze_dataset_splits.py` analyzes the distribution of plan lengths across all successfully generated unique problems. It then creates stratified `train_files.txt`, `val_files.txt`, and `test_files.txt`, ensuring that all instances of a unique (initial, goal) pair are kept within the same split.
+    - This script also determines and saves the `max_plan_length.txt` file, which is used by the `pats.sh` script to set the maximum plan generation length for models during benchmarking.
 
 ### Data Structure and Format
 
@@ -34,22 +40,23 @@ The dataset is organized into two distinct top-level directories: `raw_problems`
 
 This directory contains all the raw, **encoding-agnostic** data. It serves as the foundation for all subsequent encoding steps.
 
--   `pddl/`: PDDL problem definition files (`.pddl`).
--   `plans/`: Plan files generated by Fast Downward (`.plan`).
--   `val_out/`: Verbose output from VAL (`.val.log`).
--   `trajectories_text/`: Human-readable text representation of state trajectories (`.traj.txt`). This is the intermediate representation used for all encodings.
--   `splits/`: Contains the data splits and analysis artifacts.
-    -   `train_files.txt`, `val_files.txt`, `test_files.txt`: Lists of problem basenames for each data split.
-    -   `plan_length_distribution_*.png`: Plots visualizing the plan length distributions.
+- `pddl/`: PDDL problem definition files (`.pddl`).
+- `plans/`: Plan files generated by Fast Downward (`.plan`).
+- `val_out/`: Verbose output from VAL (`.val.log`).
+- `trajectories_text/`: Human-readable text representation of state trajectories (`.traj.txt`). This is the intermediate representation used for all encodings.
+- `splits/`: Contains the data splits and analysis artifacts.
+  - `train_files.txt`, `val_files.txt`, `test_files.txt`: Lists of problem basenames for each data split.
+  - `plan_length_distribution_*.png`: Plots visualizing the plan length distributions.
+  - `max_plan_length.txt`: A single integer indicating the maximum plan length found in the dataset for this `num_blocks`.
 
 #### `data/processed_trajectories/<domain_name>/N<num_blocks>/<encoding_type>/`
 
 This directory contains the final, **encoding-specific** numerical representations of state trajectories and their associated metadata. Each encoding type (`bin`, `sas`, etc.) gets its own subdirectory.
 
--   `encoding_info.json`: **Crucial file** describing the encoding used (type, feature dimension, block order, etc.). This file makes each processed dataset self-describing.
--   `predicate_manifest.txt`: For `bin` encoding only, this lists all predicates in order, defining the feature map.
--   `blocks_<N>_problem_<M>.traj.<encoding>.npy`: NumPy array of shape `(L, F)` containing the encoded state trajectory, where `L` is the plan length + 1 and `F` is the feature dimension.
--   `blocks_<N>_problem_<M>.goal.<encoding>.npy`: NumPy array of shape `(F,)` representing the encoded goal state.
+- `encoding_info.json`: **Crucial file** describing the encoding used (type, feature dimension, block order, etc.). This file makes each processed dataset self-describing.
+- `predicate_manifest.txt`: For `bin` encoding only, this lists all predicates in order, defining the feature map.
+- `blocks_<N>_problem_<M>.traj.<encoding>.npy`: NumPy array of shape `(L, F)` containing the encoded state trajectory, where `L` is the number of states in the trajectory (plan length + 1) and `F` is the feature dimension.
+- `blocks_<N>_problem_<M>.goal.<encoding>.npy`: NumPy array of shape `(F,)` representing the encoded goal state.
 
 ### State Encoding
 
@@ -57,17 +64,20 @@ PaTS supports multiple state encoding schemes, controlled by the `--encoding_typ
 
 #### Binary Predicate Encoding (`bin`)
 
--   **Representation**: A sparse binary vector where each element corresponds to a ground predicate (e.g., `(on-table b1)`). A value of `1` means the predicate is true, and `0` means it is false.
--   **Size**: Scales quadratically with the number of blocks, O(n²).
--   **Configuration**: The structure is defined by `predicate_manifest.txt` located within the `.../bin/` directory. The corresponding `encoding_info.json` file specifies the type as `bin` and points to this manifest.
+- **Representation**: A sparse binary vector where each element (bit) corresponds to a unique ground predicate (e.g., `(on-table b1)`). A value of `1` indicates the predicate is true in that state, and `0` indicates it is false.
+- **Size**: The dimensionality of this vector scales quadratically with the number of blocks, O(N²). For `N` blocks, the number of possible predicates is approximately `N_on_table + N_on_block + N_clear + N_holding + N_arm_empty = N + N*(N-1) + N + N + 1 = N^2 + 2N + 1`.
+- **Example (N=2, simplified)**:
+  - Predicates: `(on-table b1)`, `(on-table b2)`, `(on b1 b2)`, `(on b2 b1)`, `(clear b1)`, `(clear b2)`, `(arm-empty)`, `(holding b1)`, `(holding b2)`
+  - State "b1 on table, b2 on b1, b2 clear, arm empty": `[1, 0, 0, 1, 0, 1, 1, 0, 0]`
+- **Configuration**: The exact order and list of predicates are defined in `predicate_manifest.txt` within the `.../bin/` directory. The `encoding_info.json` file specifies the encoding type as `bin` and references this manifest.
 
 #### SAS+-like Position Vector Encoding (`sas`)
 
--   **Representation**: A dense integer vector where the _index_ represents a block and the _value_ represents its position. This is a multi-valued representation inspired by SAS+ formalisms.
-    -   `vector[i]` corresponds to block `b(i+1)`.
-    -   Value `0`: The block is on the table.
-    -   Value `j > 0`: The block is on top of block `bj`.
-    -   Value `-1`: The block is being held by the arm.
--   **Example (4 blocks)**: For the state "A on B, B on table, C on D, D on table" (with A=b1, B=b2, C=b3, D=b4), the encoding is `[2, 0, 4, 0]`.
--   **Size**: Scales linearly with the number of blocks, O(n).
--   **Configuration**: The `encoding_info.json` file, located in the `.../sas/` directory, specifies the type as `sas` and lists the canonical block order used for indexing. No separate manifest file is needed.
+- **Representation**: A dense integer vector where the _index_ represents a block and the _value_ represents its position. This is a multi-valued representation inspired by SAS+ formalisms.
+  - `vector[i]` corresponds to block `b(i+1)`.
+  - Value `0`: The block is on the table.
+  - Value `j > 0`: The block is on top of block `b(j)`.
+  - Value `-1`: The block is being held by the arm.
+- **Example (N=4)**: For the state "b1 on b2, b2 on table, b3 on b4, b4 on table, arm-empty", the encoding is `[2, 0, 4, 0]`.
+- **Size**: Scales linearly with the number of blocks, O(n).
+- **Configuration**: The `encoding_info.json` file, located in the `.../sas/` directory, specifies the type as `sas` and lists the canonical block order used for indexing. No separate manifest file is needed.

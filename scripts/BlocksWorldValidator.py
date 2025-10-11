@@ -41,7 +41,7 @@ class BlocksWorldValidator:
         self.block_names: List[str] = [f"b{i + 1}" for i in range(self.num_blocks)]
 
         if self.encoding_type == "bin":
-            self.predicate_manifest_file = processed_data_dir / f"predicate_manifest_{num_blocks}.txt"
+            self.predicate_manifest_file = processed_data_dir / "predicate_manifest.txt"
             # These will be populated by _setup_feature_indices_binary
             self.predicate_list: List[str] = []
             self.on_table_indices: Dict[str, int] = {}

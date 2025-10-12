@@ -32,7 +32,7 @@ ROOT_DIR="$HOME/planning/"                                                     #
 DOMAIN_FILE="${ROOT_DIR}pddl-generators/blocksworld/4ops/domain.pddl"          # Path to the PDDL domain file
 FD_PATH="${ROOT_DIR}downward/fast-downward.py"                                 # Path to the Fast Downward planner script
 VALIDATE_PATH="${ROOT_DIR}VAL/bin/Validate"                                    # Path to the VAL executable
-PARSER_ENCODER_SCRIPT="./data/parse_and_encode.py"                             # Python script to parse VAL output, PDDL, and encode states
+PARSER_ENCODER_SCRIPT="./data/parse_and_encode_bw.py"                             # Python script to parse VAL output, PDDL, and encode states
 ANALYZE_AND_SPLIT_SCRIPT="./data/analyze_dataset_splits.py"                    # Python script to analyze dataset and create train-test splits
 GET_PROBLEM_HASH_SCRIPT="./data/get_problem_hash.py"                           # Python script to get unique hash for a problem
 PROBLEM_GENERATOR_SCRIPT="${ROOT_DIR}pddl-generators/blocksworld/blocksworld"  # Path to the script that generates PDDL problem files (executable from the pddl-generators repository)
@@ -95,7 +95,7 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
 
     # Define the ordered list of all possible predicates for this num_blocks
     # This is crucial for consistent binary encoding.
-    # The parse_and_encode.py script will need to generate this list based on num_blocks.
+    # The parse_and_encode_bw.py script will need to generate this list based on num_blocks.
     # Or, you can pre-generate these lists and pass the file path to the script.
 
     for i in $(seq 1 $PROBLEMS_PER_CONFIG); do
@@ -106,7 +106,7 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
         PLAN_FILE="${RAW_BLOCK_DIR}/plans/${PROBLEM_BASENAME}.plan"
         VAL_OUTPUT_FILE="${RAW_BLOCK_DIR}/val_out/${PROBLEM_BASENAME}.val.log"
 
-        # For parse_and_encode.py outputs
+        # For parse_and_encode_bw.py outputs
         TEXT_TRAJECTORY_FILE="${RAW_BLOCK_DIR}/trajectories_text/${PROBLEM_BASENAME}.traj.txt"
         BINARY_TRAJECTORY_FILE_PREFIX="${PROCESSED_BLOCK_ENCODING_DIR}/${PROBLEM_BASENAME}" # .traj.<encoding>.npy will be appended
 

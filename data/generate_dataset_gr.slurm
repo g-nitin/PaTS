@@ -27,7 +27,7 @@ ENCODING_TYPES=("bin" "sas")
 NUM_ROBOTS=2
 NUM_ROOMS=4
 NUM_OBJECTS=3
-PROBLEMS_TO_GENERATE=$((10 * 10))
+PROBLEMS_TO_GENERATE=$((500 * 100))
 
 ROOT_DIR="$HOME/planning/"                                              # Base directory for all planning related tools and files
 DOMAIN_FILE="${ROOT_DIR}pddl-generators/grippers/domain.pddl"           # Path to the PDDL domain file

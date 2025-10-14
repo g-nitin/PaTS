@@ -80,7 +80,7 @@ if [ -d "$PROCESSED_PROBLEM_DIR" ]; then
     exit 0 # Use exit instead of continue since there's no loop
     fi
 
-echo "Generating problems for config ${PROBLEM_PROBLEM_CONFIG_NAME} into $RAW_PROBLEM_DIR..."
+echo "Generating problems for config ${PROBLEM_CONFIG_NAME} into $RAW_PROBLEM_DIR..."
 
 mkdir -p "$RAW_PROBLEM_DIR/pddl"
 mkdir -p "$RAW_PROBLEM_DIR/plans"
@@ -90,6 +90,7 @@ mkdir -p "$RAW_PROBLEM_DIR/splits" # For train/val/test files
 
 # Temporary file to store unique problem hashes
 UNIQUE_HASHES_FILE="${RAW_PROBLEM_DIR}/.unique_problem_hashes.tmp"
+> "$UNIQUE_HASHES_FILE" # Create or truncate the file to prevent grep errors
 successful_for_size=0
 
 for i in $(seq 1 $PROBLEMS_TO_GENERATE); do

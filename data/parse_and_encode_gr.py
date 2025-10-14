@@ -13,10 +13,14 @@ def get_ordered_predicate_list(num_robots, num_rooms, num_objects):
     """
     Generates a fixed, ordered list of all possible predicates for the Grippers domain.
     """
-    robots = [f"r{i + 1}" for i in range(num_robots)]
+    robots = [f"robot{i + 1}" for i in range(num_robots)]
     rooms = [f"room{i + 1}" for i in range(num_rooms)]
     objects = [f"ball{i + 1}" for i in range(num_objects)]
-    grippers = ["left", "right"]
+    # Generate actual gripper object names for each robot
+    grippers = []
+    for i in range(num_robots):
+        grippers.append(f"lgripper{i + 1}")
+        grippers.append(f"rgripper{i + 1}")
     predicates = []
 
     # (at-robby ?r - robot ?x - room)
@@ -65,7 +69,7 @@ def state_preds_to_sas_vector(
 
     for pred in state_predicates_set:
         # (at-robby rX roomY)
-        m_at_robby = re.fullmatch(r"\(at-robby (r\d+) (room\d+)\)", pred)
+        m_at_robby = re.fullmatch(r"\(at-robby (r\w+\d+) (room\d+)\)", pred)
         if m_at_robby:
             robot_name, room_name = m_at_robby.groups()
             robot_idx = robot_to_idx[robot_name]
@@ -83,13 +87,31 @@ def state_preds_to_sas_vector(
             continue
 
         # (carry rX ballY gripperZ)
-        m_carry = re.fullmatch(r"\(carry (r\d+) (ball\d+) (left|right)\)", pred)
+        m_carry = re.fullmatch(r"\(carry (robot\d+) (ball\d+) (lgripper\d+|rgripper\d+)\)", pred)
         if m_carry:
             robot_name, obj_name, gripper_name = m_carry.groups()
             obj_idx = object_to_idx[obj_name]
-            gripper_val = gripper_map[f"{robot_name}-{gripper_name}"]
+            gripper_val = gripper_map[gripper_name]
             position_vector[num_robots + obj_idx] = gripper_val
             continue
+
+    if np.any(position_vector == -99):
+        unassigned_indices = np.where(position_vector == -99)[0]
+        error_messages = []
+        for idx in unassigned_indices:
+            if idx < num_robots:
+                entity_name = robot_names[idx]
+                entity_type = "robot"
+            else:
+                entity_name = object_names[idx - num_robots]
+                entity_type = "object"
+            error_messages.append(f"  - {entity_type} '{entity_name}' (index {idx})")
+
+        raise ValueError(
+            "Failed to assign a valid SAS+ position to all entities. Unassigned entities:\n"
+            + "\n".join(error_messages)
+            + f"\nPredicate set being processed: {state_predicates_set}"
+        )
 
     return position_vector
 
@@ -325,12 +347,17 @@ def main():
 
     try:
         # Generate entity names once
-        robot_names = [f"r{i + 1}" for i in range(args.num_robots)]
+        robot_names = [f"robot{i + 1}" for i in range(args.num_robots)]
         room_names = [f"room{i + 1}" for i in range(args.num_rooms)]
         object_names = [f"ball{i + 1}" for i in range(args.num_objects)]
-        gripper_names = ["left", "right"]
         processed_dir = Path(args.binary_output_prefix).parent
         gripper_map: dict = {}
+
+        # Generate actual gripper object names for each robot
+        all_gripper_objects = []
+        for i in range(args.num_robots):
+            all_gripper_objects.append(f"lgripper{i + 1}")
+            all_gripper_objects.append(f"rgripper{i + 1}")
 
         # 1. Generate encoding-specific information
         processed_dir.mkdir(parents=True, exist_ok=True)  # Ensure destination exists
@@ -353,12 +380,8 @@ def main():
             }
         elif args.encoding_type == "sas":
             ordered_master_pred_list = None  # Not used for SAS
-            # Create a consistent mapping from (robot, gripper) to a unique negative ID
-            gripper_map = {
-                f"{r_name}-{g_name}": -((r_idx * len(gripper_names)) + g_idx + 1)
-                for r_idx, r_name in enumerate(robot_names)
-                for g_idx, g_name in enumerate(gripper_names)
-            }
+            # Create a consistent mapping from gripper object name to a unique negative ID
+            gripper_map = {name: -(i + 1) for i, name in enumerate(all_gripper_objects)}
             encoding_info = {
                 "type": "sas",
                 "feature_dim": args.num_robots + args.num_objects,
@@ -441,15 +464,10 @@ def main():
         if args.encoding_type == "bin":
             goal_vector_np = state_preds_to_binary_vector(goal_state_preds_normalized_set, ordered_master_pred_list)
         else:  # sas
-            goal_vector_np = state_preds_to_sas_vector(
-                goal_state_preds_normalized_set,
-                args.num_robots,
-                args.num_objects,
-                robot_names,
-                object_names,
-                room_names,
-                gripper_map,
-            )
+            # For SAS, the goal must be a complete state. The final state of the
+            # expert trajectory is the complete goal state that satisfies the
+            # (potentially partial) PDDL goal.
+            goal_vector_np = trajectory_np[-1]
 
         # 6. Save text trajectory
         # The directory for text_trajectory_output should already be created by generate_dataset.sh

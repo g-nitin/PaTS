@@ -1,5 +1,11 @@
 # Planning as Time-Series (PaTS)
 
+> [!WARNING]
+> This README is out-of-date since it doesn't reflect the newer grippers integration.
+
+> [!NOTE]
+> This is repository is a work in progress.
+
 ## Overview
 
 This project introduces **Planning as Time-Series (PaTS)**, a framework that fundamentally shifts the paradigm of automated planning. Instead of casting planning as a search problem through state spaces or relying on explicit symbolic reasoning about preconditions and effects, PaTS reformulates it as a **time-series forecasting problem**.

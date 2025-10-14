@@ -1,5 +1,8 @@
 # PaTS Models
 
+> [!WARNING]
+> This README is out-of-date since it doesn't reflect the newer grippers integration.
+
 This directory contains the implementations and wrappers for various time-series models adapted to the Planning as Time-Series (PaTS) framework. Each model is designed to learn an implicit transition function from demonstrated plan trajectories and generate sequences of states (plans) autoregressively.
 
 All models adhere to the `PlannableModel` abstract interface, which standardizes how they are loaded, how they predict sequences, and how their metadata (like `model_name` and `state_dim`) is accessed. This allows the `benchmark.py` script to evaluate different models interchangeably.

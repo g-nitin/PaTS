@@ -1,5 +1,8 @@
 ## Dataset
 
+> [!WARNING]
+> This README is out-of-date since it doesn't reflect the newer grippers integration.
+
 The dataset for PaTS consists of solved planning problem instances from the Blocksworld domain. Each instance includes the problem definition, the expert plan, and the full state trajectory from the initial state to the goal state.
 
 ### Generation Workflow
@@ -81,3 +84,23 @@ PaTS supports multiple state encoding schemes, controlled by the `--encoding_typ
 - **Example (N=4)**: For the state "b1 on b2, b2 on table, b3 on b4, b4 on table, arm-empty", the encoding is `[2, 0, 4, 0]`.
 - **Size**: Scales linearly with the number of blocks, O(n).
 - **Configuration**: The `encoding_info.json` file, located in the `.../sas/` directory, specifies the type as `sas` and lists the canonical block order used for indexing. No separate manifest file is needed.
+
+## Note on SAS+ Goal Vector Generation Strategy
+
+This section explains the difference in how the final goal vector is generated for the SAS+ (`sas`) encoding between the **Blocksworld** and **Grippers** domains.
+
+The core issue stems from the nature of the goal definitions in their respective PDDL files and the requirement of the SAS+ encoding to represent a **complete world state**.
+
+### Blocksworld (`parse_and_encode_bw.py`)
+
+- **Goal Definition**: In the Blocksworld domain, a PDDL goal is typically a **complete specification** of the final state. It defines the final position of every single block (e.g., `(on b1 b2)`, `(on b2 b3)`, `(on-table b3)`).
+- **Vector Generation**: Because the PDDL goal contains all the necessary information, the script can directly parse these goal predicates and convert them into a complete SAS+ vector. No information is missing.
+- **Conclusion**: The implementation in `parse_and_encode_bw.py` is correct and requires no changes.
+
+### Grippers (`parse_and_encode_gr.py`)
+
+- **Goal Definition**: In the Grippers domain, a PDDL goal is a **partial specification** of the final state. It typically only defines the desired final locations of the objects (e.g., `(at ball1 room2)`), but it does _not_ specify the final locations of the robots.
+- **Vector Generation Problem**: This partial goal is insufficient for creating a complete SAS+ state vector, which requires a known location for every robot and object. Attempting to encode this partial goal directly resulted in an error because the robots' positions were undefined.
+- **Solution**: The correct goal for the time-series model is the **final state of the expert-generated plan trajectory**. This final state is, by definition, a complete world state that satisfies the partial PDDL goal. The script was therefore modified to use the last vector from the generated state trajectory (`trajectory_np[-1]`) as the true goal vector for the `sas` encoding.
+
+This distinction is why the goal generation logic differs between the two parsing scripts.

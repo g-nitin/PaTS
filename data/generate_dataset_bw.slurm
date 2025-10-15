@@ -24,21 +24,21 @@ conda activate pats
 
 DOMAIN_NAME="blocksworld"          # Name of the planning domain
 ENCODING_TYPES=("bin" "sas")       # The state encodings to use
-PROBLEMS_PER_CONFIG=$((1000*300))  # Number of problems to generate for each block count
-MIN_BLOCKS_TO_GENERATE=6           # MIN block numbers for problem generation
-MAX_BLOCKS_TO_GENERATE=6           # MAX block numbers for problem generation
+PROBLEMS_PER_CONFIG=$((100 * 100)) # Number of problems to generate for each block count
+MIN_BLOCKS_TO_GENERATE=4           # MIN block numbers for problem generation
+MAX_BLOCKS_TO_GENERATE=4           # MAX block numbers for problem generation
 
-ROOT_DIR="$HOME/planning/"                                                     # Base directory for all planning related tools and files
-DOMAIN_FILE="${ROOT_DIR}pddl-generators/blocksworld/4ops/domain.pddl"          # Path to the PDDL domain file
-FD_PATH="${ROOT_DIR}downward/fast-downward.py"                                 # Path to the Fast Downward planner script
-VALIDATE_PATH="${ROOT_DIR}VAL/bin/Validate"                                    # Path to the VAL executable
-PARSER_ENCODER_SCRIPT="./data/parse_and_encode_bw.py"                             # Python script to parse VAL output, PDDL, and encode states
-ANALYZE_AND_SPLIT_SCRIPT="./data/analyze_dataset_splits.py"                    # Python script to analyze dataset and create train-test splits
-GET_PROBLEM_HASH_SCRIPT="./data/get_problem_hash.py"                           # Python script to get unique hash for a problem
-PROBLEM_GENERATOR_SCRIPT="${ROOT_DIR}pddl-generators/blocksworld/blocksworld"  # Path to the script that generates PDDL problem files (executable from the pddl-generators repository)
+ROOT_DIR="$HOME/planning/"                                                    # Base directory for all planning related tools and files
+DOMAIN_FILE="${ROOT_DIR}pddl-generators/blocksworld/4ops/domain.pddl"         # Path to the PDDL domain file
+FD_PATH="${ROOT_DIR}downward/fast-downward.py"                                # Path to the Fast Downward planner script
+VALIDATE_PATH="${ROOT_DIR}VAL/bin/Validate"                                   # Path to the VAL executable
+PARSER_ENCODER_SCRIPT="./data/parse_and_encode_bw.py"                         # Python script to parse VAL output, PDDL, and encode states
+ANALYZE_AND_SPLIT_SCRIPT="./data/analyze_dataset_splits.py"                   # Python script to analyze dataset and create train-test splits
+GET_PROBLEM_HASH_SCRIPT="./data/get_problem_hash.py"                          # Python script to get unique hash for a problem
+PROBLEM_GENERATOR_SCRIPT="${ROOT_DIR}pddl-generators/blocksworld/blocksworld" # Path to the script that generates PDDL problem files (executable from the pddl-generators repository)
 
-FD_TIMEOUT="60s"                   # Timeout for Fast Downward (e.g., 60s, 5m)
-FD_SEARCH_CONFIG="astar(lmcut())"  # FS search configuration; common ones: "astar(lmcut())", "astar(ipdb())", "astar(blind())"
+FD_TIMEOUT="60s"                  # Timeout for Fast Downward (e.g., 60s, 5m)
+FD_SEARCH_CONFIG="astar(lmcut())" # FS search configuration; common ones: "astar(lmcut())", "astar(ipdb())", "astar(blind())"
 
 # Helper Script Check
 if [ ! -f "$PARSER_ENCODER_SCRIPT" ] || [ ! -f "$ANALYZE_AND_SPLIT_SCRIPT" ] || [ ! -f "$GET_PROBLEM_HASH_SCRIPT" ]; then
@@ -46,7 +46,7 @@ if [ ! -f "$PARSER_ENCODER_SCRIPT" ] || [ ! -f "$ANALYZE_AND_SPLIT_SCRIPT" ] || 
     exit 1
 fi
 
-BASE_DATA_DIR="./data"  # This will be the root for raw_problems and processed_trajectories
+BASE_DATA_DIR="./data" # This will be the root for raw_problems and processed_trajectories
 RAW_PROBLEMS_ROOT="${BASE_DATA_DIR}/raw_problems/${DOMAIN_NAME}"
 PROCESSED_TRAJECTORIES_ROOT="${BASE_DATA_DIR}/processed_trajectories/${DOMAIN_NAME}"
 
@@ -76,10 +76,10 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
     # Ask user about overwriting if the processed outputs already exists
     if [ -d "$PROCESSED_BLOCK_DIR" ]; then
         echo "Processed trajectories directory '$PROCESSED_BLOCK_DIR' already exists."
-            echo "Skipping generation for $num_blocks blocks."
+        echo "Skipping generation for $num_blocks blocks."
         continue
     fi
-    
+
     echo "Generating problems for $num_blocks blocks into $RAW_BLOCK_DIR and $PROCESSED_BLOCK_ENCODING_DIR..."
 
     mkdir -p "$RAW_BLOCK_DIR/pddl"
@@ -99,7 +99,7 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
     # Or, you can pre-generate these lists and pass the file path to the script.
 
     for i in $(seq 1 $PROBLEMS_PER_CONFIG); do
-        SEED=$(( (num_blocks * 1000) + i )) # Simple way to get different seeds
+        SEED=$(((num_blocks * 1000) + i)) # Simple way to get different seeds
         PROBLEM_BASENAME="blocks_${num_blocks}_problem_${i}"
 
         PDDL_FILE="${RAW_BLOCK_DIR}/pddl/${PROBLEM_BASENAME}.pddl"
@@ -116,7 +116,7 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
         # 1. Generate PDDL problem
         # The blocksworld generator takes: <ops_mode (3 or 4)> <num_blocks> <seed>
         echo "    Generating PDDL for $PROBLEM_BASENAME with $num_blocks blocks..."
-        "$PROBLEM_GENERATOR_SCRIPT" 4 "$num_blocks" "$SEED" > "$PDDL_FILE"
+        "$PROBLEM_GENERATOR_SCRIPT" 4 "$num_blocks" "$SEED" >"$PDDL_FILE"
         if [ $? -ne 0 ] || [ ! -s "$PDDL_FILE" ]; then
             echo "    ERROR: Failed to generate PDDL for $PROBLEM_BASENAME"
             TOTAL_FAILED_GENERATION=$((TOTAL_FAILED_GENERATION + 1))
@@ -126,8 +126,8 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
 
         # 2. Solve with Fast Downward (with timeout)
         echo "    Running Fast Downward for $PROBLEM_BASENAME..."
-        timeout "$FD_TIMEOUT" "$FD_PATH" --plan-file "$PLAN_FILE" "$DOMAIN_FILE" "$PDDL_FILE" --search "$FD_SEARCH_CONFIG" > /dev/null 2>&1
-        
+        timeout "$FD_TIMEOUT" "$FD_PATH" --plan-file "$PLAN_FILE" "$DOMAIN_FILE" "$PDDL_FILE" --search "$FD_SEARCH_CONFIG" >/dev/null 2>&1
+
         if [ ! -s "$PLAN_FILE" ]; then
             echo "    WARNING: FD failed or timed out for $PROBLEM_BASENAME"
             echo "    Command was : $FD_PATH --plan-file $PLAN_FILE $DOMAIN_FILE $PDDL_FILE --search $FD_SEARCH_CONFIG"
@@ -138,7 +138,7 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
         fi
 
         # Also skip on plan with no length (1 line containing "; cost = 0 (unit cost)")
-        PLAN_LENGTH=$(wc -l < "$PLAN_FILE")
+        PLAN_LENGTH=$(wc -l <"$PLAN_FILE")
         if [ "$PLAN_LENGTH" -eq 1 ]; then
             echo "    WARNING: FD produced an empty plan for $PROBLEM_BASENAME"
             TOTAL_FAILED_FD=$((TOTAL_FAILED_FD + 1))
@@ -149,7 +149,7 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
 
         # 3. Validate plan with VAL (verbose mode)
         echo "    Validating plan with VAL for $PROBLEM_BASENAME..."
-        "$VALIDATE_PATH" -v "$DOMAIN_FILE" "$PDDL_FILE" "$PLAN_FILE" > "$VAL_OUTPUT_FILE" 2>&1
+        "$VALIDATE_PATH" -v "$DOMAIN_FILE" "$PDDL_FILE" "$PLAN_FILE" >"$VAL_OUTPUT_FILE" 2>&1
         # Check VAL's exit code and output for success
         # VAL usually exits 0 on success. "Plan valid" or "Plan executed successfully" should be in output.
         if [ $? -ne 0 ] || ! grep -q -E "Plan valid|Plan executed successfully" "$VAL_OUTPUT_FILE"; then
@@ -219,12 +219,12 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
             done
         else
             # If unique, add hash to tracker and count as successful
-            echo "$PROBLEM_HASH" >> "$UNIQUE_HASHES_FILE"
+            echo "$PROBLEM_HASH" >>"$UNIQUE_HASHES_FILE"
             echo "    SUCCESS: $PROBLEM_BASENAME processed and is unique."
             successful_for_size=$((successful_for_size + 1))
             TOTAL_SUCCESSFUL=$((TOTAL_SUCCESSFUL + 1))
         fi
-    
+
     done
     echo -e "\n"
     echo "  Finished $num_blocks blocks. Successful: $successful_for_size / $PROBLEMS_PER_CONFIG"

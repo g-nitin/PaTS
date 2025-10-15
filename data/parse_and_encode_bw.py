@@ -405,7 +405,10 @@ def main():
         if args.encoding_type == "bin":
             goal_vector_np = state_preds_to_binary_vector(goal_state_preds_normalized_set, ordered_master_pred_list)
         else:  # sas
-            goal_vector_np = state_preds_to_sas_vector(goal_state_preds_normalized_set, args.num_blocks, block_names)
+            # For SAS+, the goal must be a complete state. The final state of the
+            # expert trajectory is the complete goal state that satisfies the
+            # (potentially partial) PDDL goal.
+            goal_vector_np = trajectory_np[-1]
 
         # 6. Save text trajectory
         # The directory for text_trajectory_output should already be created by generate_dataset.sh

@@ -22,13 +22,14 @@ module use "$HOME/privatemodules"
 module load conda-env/pats-py3.12.8
 conda activate pats
 
-DOMAIN_NAME="grippers"
-ENCODING_TYPES=("bin" "sas")
+TARGET_UNIQUE_PROBLEMS_PER_CONFIG=$((10 * 10)) # Aim for this many unique problems per block/gripper configuration
+MAX_GENERATION_ATTEMPTS_PER_CONFIG=2000        # Stop after this many attempts, even if target not met
 NUM_ROBOTS=2
 NUM_ROOMS=4
 NUM_OBJECTS=3
-PROBLEMS_TO_GENERATE=$((500 * 100))
 
+DOMAIN_NAME="grippers"
+ENCODING_TYPES=("bin" "sas")
 ROOT_DIR="$HOME/planning/"                                              # Base directory for all planning related tools and files
 DOMAIN_FILE="${ROOT_DIR}pddl-generators/grippers/domain.pddl"           # Path to the PDDL domain file
 FD_PATH="${ROOT_DIR}downward/fast-downward.py"                          # Path to the Fast Downward planner script
@@ -73,12 +74,12 @@ PROBLEM_CONFIG_NAME="R${NUM_ROBOTS}-O${NUM_OBJECTS}-RM${NUM_ROOMS}"
 RAW_PROBLEM_DIR="${RAW_PROBLEMS_ROOT}/${PROBLEM_CONFIG_NAME}"
 PROCESSED_PROBLEM_DIR="${PROCESSED_TRAJECTORIES_ROOT}/${PROBLEM_CONFIG_NAME}"
 
-    # Ask user about overwriting if the processed outputs already exists
+# Ask user about overwriting if the processed outputs already exists
 if [ -d "$PROCESSED_PROBLEM_DIR" ]; then
     echo "Processed trajectories directory '$PROCESSED_PROBLEM_DIR' already exists."
     echo "Skipping generation for this configuration."
     exit 0 # Use exit instead of continue since there's no loop
-    fi
+fi
 
 echo "Generating problems for config ${PROBLEM_CONFIG_NAME} into $RAW_PROBLEM_DIR..."
 
@@ -88,15 +89,20 @@ mkdir -p "$RAW_PROBLEM_DIR/val_out"
 mkdir -p "$RAW_PROBLEM_DIR/trajectories_text"
 mkdir -p "$RAW_PROBLEM_DIR/splits" # For train/val/test files
 
-# Temporary file to store unique problem hashes
+# Initialize counters for the loop
+current_attempt=0
+successful_for_size=0 # This counter will track UNIQUE successful problems
+
+# Temporary file to store unique problem hashes for the current num_blocks/config
+# Ensure this file is created/truncated at the start of each config loop
 UNIQUE_HASHES_FILE="${RAW_PROBLEM_DIR}/.unique_problem_hashes.tmp"
-> "$UNIQUE_HASHES_FILE" # Create or truncate the file to prevent grep errors
-successful_for_size=0
+>"$UNIQUE_HASHES_FILE" # Create or truncate the file
 
-for i in $(seq 1 $PROBLEMS_TO_GENERATE); do
-    SEED=$(( (NUM_ROBOTS * 10000) + (NUM_ROOMS * 1000) + (NUM_OBJECTS * 100) + i ))
-    PROBLEM_BASENAME="grippers_${PROBLEM_CONFIG_NAME}_problem_${i}"
+while [ "$successful_for_size" -lt "$TARGET_UNIQUE_PROBLEMS_PER_CONFIG" ] && [ "$current_attempt" -lt "$MAX_GENERATION_ATTEMPTS_PER_CONFIG" ]; do
+    current_attempt=$((current_attempt + 1))
+    SEED=$(((NUM_ROBOTS * 10000) + (NUM_ROOMS * 1000) + (NUM_OBJECTS * 100) + current_attempt))
 
+    PROBLEM_BASENAME="grippers_${PROBLEM_CONFIG_NAME}_problem_${current_attempt}"
     PDDL_FILE="${RAW_PROBLEM_DIR}/pddl/${PROBLEM_BASENAME}.pddl"
     PLAN_FILE="${RAW_PROBLEM_DIR}/plans/${PROBLEM_BASENAME}.plan"
     VAL_OUTPUT_FILE="${RAW_PROBLEM_DIR}/val_out/${PROBLEM_BASENAME}.val.log"
@@ -216,14 +222,14 @@ for i in $(seq 1 $PROBLEMS_TO_GENERATE); do
     else
         # If unique, add hash to tracker and count as successful
         echo "$PROBLEM_HASH" >>"$UNIQUE_HASHES_FILE"
-        echo "    SUCCESS: $PROBLEM_BASENAME processed and is unique."
+        echo "    SUCCESS: $PROBLEM_BASENAME processed and is unique. ($successful_for_size / $TARGET_UNIQUE_PROBLEMS_PER_CONFIG unique problems so far)"
         successful_for_size=$((successful_for_size + 1))
         TOTAL_SUCCESSFUL=$((TOTAL_SUCCESSFUL + 1))
     fi
 
 done
 echo ""
-echo "  Finished processing. Successful: $successful_for_size / $PROBLEMS_TO_GENERATE"
+echo "  Finished processing. Successful unique problems: $successful_for_size / $TARGET_UNIQUE_PROBLEMS_PER_CONFIG (Total attempts: $current_attempt)"
 rm -f "$UNIQUE_HASHES_FILE" # Clean up temporary hash file
 
 # 5. Analyze dataset and create train-test splits

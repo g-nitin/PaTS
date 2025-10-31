@@ -22,12 +22,13 @@ module use "$HOME/privatemodules"
 module load conda-env/pats-py3.12.8
 conda activate pats
 
-DOMAIN_NAME="blocksworld"          # Name of the planning domain
-ENCODING_TYPES=("bin" "sas")       # The state encodings to use
-PROBLEMS_PER_CONFIG=$((100 * 100)) # Number of problems to generate for each block count
-MIN_BLOCKS_TO_GENERATE=4           # MIN block numbers for problem generation
-MAX_BLOCKS_TO_GENERATE=4           # MAX block numbers for problem generation
+TARGET_UNIQUE_PROBLEMS_PER_CONFIG=$((10 * 100)) # Aim for this many unique problems per block configuration
+MAX_GENERATION_ATTEMPTS_PER_CONFIG=2000         # Stop after this many attempts, even if target not met
+MIN_BLOCKS_TO_GENERATE=3                        # MIN block numbers for problem generation
+MAX_BLOCKS_TO_GENERATE=3                        # MAX block numbers for problem generation
 
+DOMAIN_NAME="blocksworld"                                                     # Name of the planning domain
+ENCODING_TYPES=("bin" "sas")                                                  # The state encodings to use
 ROOT_DIR="$HOME/planning/"                                                    # Base directory for all planning related tools and files
 DOMAIN_FILE="${ROOT_DIR}pddl-generators/blocksworld/4ops/domain.pddl"         # Path to the PDDL domain file
 FD_PATH="${ROOT_DIR}downward/fast-downward.py"                                # Path to the Fast Downward planner script
@@ -88,20 +89,20 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
     mkdir -p "$RAW_BLOCK_DIR/trajectories_text"
     mkdir -p "$RAW_BLOCK_DIR/splits" # For train/val/test files
 
-    successful_for_size=0
+    # Initialize counters for the loop
+    current_attempt=0
+    successful_for_size=0 # This counter will track UNIQUE successful problems
 
-    # Temporary file to store unique problem hashes for the current num_blocks
+    # Temporary file to store unique problem hashes for the current num_blocks/config
+    # Ensure this file is created/truncated at the start of each num_blocks/config loop
     UNIQUE_HASHES_FILE="${RAW_BLOCK_DIR}/.unique_problem_hashes_N${num_blocks}.tmp"
+    >"$UNIQUE_HASHES_FILE" # Create or truncate the file
 
-    # Define the ordered list of all possible predicates for this num_blocks
-    # This is crucial for consistent binary encoding.
-    # The parse_and_encode_bw.py script will need to generate this list based on num_blocks.
-    # Or, you can pre-generate these lists and pass the file path to the script.
+    while [ "$successful_for_size" -lt "$TARGET_UNIQUE_PROBLEMS_PER_CONFIG" ] && [ "$current_attempt" -lt "$MAX_GENERATION_ATTEMPTS_PER_CONFIG" ]; do
+        current_attempt=$((current_attempt + 1))
+        SEED=$(((num_blocks * 1000) + current_attempt))
 
-    for i in $(seq 1 $PROBLEMS_PER_CONFIG); do
-        SEED=$(((num_blocks * 1000) + i)) # Simple way to get different seeds
-        PROBLEM_BASENAME="blocks_${num_blocks}_problem_${i}"
-
+        PROBLEM_BASENAME="blocks_${num_blocks}_problem_${current_attempt}"
         PDDL_FILE="${RAW_BLOCK_DIR}/pddl/${PROBLEM_BASENAME}.pddl"
         PLAN_FILE="${RAW_BLOCK_DIR}/plans/${PROBLEM_BASENAME}.plan"
         VAL_OUTPUT_FILE="${RAW_BLOCK_DIR}/val_out/${PROBLEM_BASENAME}.val.log"
@@ -220,14 +221,15 @@ for num_blocks in $(seq $MIN_BLOCKS_TO_GENERATE $MAX_BLOCKS_TO_GENERATE); do
         else
             # If unique, add hash to tracker and count as successful
             echo "$PROBLEM_HASH" >>"$UNIQUE_HASHES_FILE"
-            echo "    SUCCESS: $PROBLEM_BASENAME processed and is unique."
+            echo "    SUCCESS: $PROBLEM_BASENAME processed and is unique. ($successful_for_size / $TARGET_UNIQUE_PROBLEMS_PER_CONFIG unique problems so far)"
             successful_for_size=$((successful_for_size + 1))
             TOTAL_SUCCESSFUL=$((TOTAL_SUCCESSFUL + 1))
         fi
 
     done
     echo -e "\n"
-    echo "  Finished $num_blocks blocks. Successful: $successful_for_size / $PROBLEMS_PER_CONFIG"
+
+    echo "  Finished $num_blocks blocks. Successful unique problems: $successful_for_size / $TARGET_UNIQUE_PROBLEMS_PER_CONFIG (Total attempts: $current_attempt)"
     rm -f "$UNIQUE_HASHES_FILE" # Clean up temporary hash file
 
     # 5. Analyze dataset and create train-test splits

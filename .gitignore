@@ -15,8 +15,8 @@ build/
 training_outputs/
 benchmark_results/
 slurm/*
-local-run.sh
 local-submit_all_runs.sh
+local-pats.sh
 
 **/__pycache__/
 

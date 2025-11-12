@@ -254,14 +254,14 @@ def main():
             batch_size=args.batch_size,
             shuffle=True,
             collate_fn=lstm_collate_fn,
-            num_workers=0,
+            num_workers=16,
         )
         val_dataloader = DataLoader(
             val_dataset,
             batch_size=args.batch_size,
             shuffle=False,
             collate_fn=lstm_collate_fn,
-            num_workers=0,
+            num_workers=16,
         )
 
         model = PaTS_LSTM(

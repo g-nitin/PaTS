@@ -10,7 +10,6 @@ import torch.optim as optim
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, pad_sequence
 
 
-# ** Model Definition **
 class PaTS_LSTM(nn.Module):
     def __init__(
         self,
@@ -19,7 +18,8 @@ class PaTS_LSTM(nn.Module):
         num_lstm_layers,
         dropout_prob=0.2,
         encoding_type="binary",
-        num_blocks=None,
+        domain="blocksworld",
+        domain_config=None,
         embedding_dim=32,
     ):
         """
@@ -35,8 +35,10 @@ class PaTS_LSTM(nn.Module):
         :type dropout_prob: float
         :param encoding_type: The encoding type of the data ('bin' or 'sas').
         :type encoding_type: str
-        :param num_blocks: The number of blocks in the SAS+ encoding (required if encoding_type is 'sas').
-        :type num_blocks: int | None
+        :param domain: The planning domain ('blocksworld' or 'grippers').
+        :type domain: str
+        :param domain_config: Domain-specific configuration dictionary.
+        :type domain_config: dict | None
         :param embedding_dim: The dimension of the embedding for SAS+ encoding.
         :type embedding_dim: int
         """
@@ -45,25 +47,40 @@ class PaTS_LSTM(nn.Module):
         self.hidden_size = hidden_size
         self.num_lstm_layers = num_lstm_layers
         self.encoding_type = encoding_type
-        self.num_blocks = num_blocks
+        self.domain = domain
+        self.domain_config = domain_config or {}
         self.embedding_dim = embedding_dim
 
         if self.encoding_type == "sas":
-            if self.num_blocks is None:
-                raise ValueError("num_blocks must be provided for SAS+ encoding.")
-            # For N blocks, locations are: arm (-1), table (0), on_block_1 (1)... on_block_N (N)
-            # Total N+2 locations.
-            self.num_locations = self.num_blocks + 2
+            if self.domain == "blocksworld":
+                self.num_blocks = self.domain_config.get("num_blocks")
+                if self.num_blocks is None:
+                    raise ValueError("domain_config must contain 'num_blocks' for blocksworld.")
+                # For N blocks, locations are: arm (-1), table (0), on_block_1 (1)... on_block_N (N)
+                self.num_locations = self.num_blocks + 2  # This is the vocabulary size per block
+                self.sas_feature_dim = self.num_blocks
+                print(f"INFO: PaTS_LSTM (SAS+, blocksworld) initialized. Num locations: {self.num_locations}")
+
+            elif self.domain == "grippers":
+                self.num_robots: int = self.domain_config.get("robots", 0)
+                self.num_objects: int = self.domain_config.get("objects", 0)
+                self.num_rooms: int = self.domain_config.get("rooms", 0)
+                if any(x == 0 for x in [self.num_robots, self.num_objects, self.num_rooms]):
+                    raise ValueError("domain_config must contain 'robots', 'objects', 'rooms' for grippers.")
+                # Vocab: rooms (1..num_rooms) + grippers (num_rooms+1..num_rooms+2*num_robots) + padding (0)
+                self.num_locations = self.num_rooms + (2 * self.num_robots) + 1
+                self.sas_feature_dim = self.num_robots + self.num_objects
+                print(f"INFO: PaTS_LSTM (SAS+, grippers) initialized. Vocab size: {self.num_locations}")
+            else:
+                raise ValueError(f"Unsupported domain for SAS+ encoding: {self.domain}")
+
             # Embedding layer to convert location indices to vectors.
-            # We add 1 to num_locations because SAS+ value -1 maps to index 0.
             self.location_embedding = nn.Embedding(self.num_locations, self.embedding_dim)
             # LSTM input is the concatenation of embedded current state and goal state
-            lstm_input_size = 2 * self.num_blocks * self.embedding_dim
-            # The head predicts a location for each block
-            self.forecasting_head = nn.Linear(hidden_size, self.num_blocks * self.num_locations)
-            print(
-                f"INFO: PaTS_LSTM (SAS+) initialized. Num locations: {self.num_locations}, Embedding dim: {self.embedding_dim}"
-            )
+            lstm_input_size = 2 * self.sas_feature_dim * self.embedding_dim
+            # The head predicts a location for each feature in the SAS vector
+            self.forecasting_head = nn.Linear(hidden_size, self.sas_feature_dim * self.num_locations)
+
         else:  # Binary encoding
             lstm_input_size = 2 * num_features
             self.forecasting_head = nn.Linear(hidden_size, num_features)
@@ -78,13 +95,34 @@ class PaTS_LSTM(nn.Module):
         )
 
     def _map_sas_to_indices(self, sas_tensor):
-        # SAS+ values: -1 (arm), 0 (table), 1..N (on block 1..N)
-        # Embedding indices: 0, 1, 2..N+1
-        return sas_tensor + 1
+        if self.domain == "blocksworld":
+            # SAS+ values: -1 (arm), 0 (table), 1..N (on block 1..N)
+            # Embedding indices: 0, 1, 2..N+1
+            return sas_tensor + 1
+        elif self.domain == "grippers":
+            # Robot pos: 1..num_rooms -> 1..num_rooms
+            # Object pos: 1..num_rooms -> 1..num_rooms
+            # Object held: -1..-2*num_robots -> num_rooms+1..num_rooms+2*num_robots
+            indices = sas_tensor.clone().long()
+            # Positive values (rooms) map directly to their own index
+            # Negative values (grippers) are shifted into the positive range after rooms
+            gripper_mask = sas_tensor < 0
+            indices[gripper_mask] = self.num_rooms + torch.abs(sas_tensor[gripper_mask])
+            return indices
+        raise NotImplementedError(f"SAS mapping not implemented for domain: {self.domain}")
 
     def _map_indices_to_sas(self, indices_tensor):
-        # Embedding indices -> SAS+ values
-        return indices_tensor - 1
+        if self.domain == "blocksworld":
+            # Embedding indices -> SAS+ values
+            return indices_tensor - 1
+        elif self.domain == "grippers":
+            sas = indices_tensor.clone().long()
+            # Indices > num_rooms represent grippers
+            gripper_mask = indices_tensor > self.num_rooms
+            # Map them back to negative values
+            sas[gripper_mask] = -(indices_tensor[gripper_mask] - self.num_rooms)
+            return sas
+        raise NotImplementedError(f"SAS mapping not implemented for domain: {self.domain}")
 
     def forward(self, current_states_batch, goal_state_batch, lengths, h_init=None, c_init=None):
         """
@@ -145,7 +183,8 @@ class PaTS_LSTM(nn.Module):
         forecasting_logits = self.forecasting_head(lstm_out)
         if self.encoding_type == "sas":
             # Reshape logits to (B, S_max, num_blocks, num_locations) for CrossEntropyLoss
-            forecasting_logits = forecasting_logits.view(batch_size, max_seq_len, self.num_blocks, self.num_locations)
+            # forecasting_logits = forecasting_logits.view(batch_size, max_seq_len, self.num_blocks, self.num_locations)
+            forecasting_logits = forecasting_logits.view(batch_size, max_seq_len, self.sas_feature_dim, self.num_locations)
 
         return forecasting_logits, (h_n, c_n)
 
@@ -193,7 +232,8 @@ class PaTS_LSTM(nn.Module):
         next_state_logits = self.forecasting_head(lstm_out.squeeze(1))
         if self.encoding_type == "sas":
             # Reshape to (1, num_blocks, num_locations)
-            logits_per_block = next_state_logits.view(1, self.num_blocks, self.num_locations)
+            # logits_per_block = next_state_logits.view(1, self.num_blocks, self.num_locations)
+            logits_per_block = next_state_logits.view(1, self.sas_feature_dim, self.num_locations)
             # Get the predicted location index for each block
             predicted_indices = torch.argmax(logits_per_block, dim=2)  # (1, N)
             # Map back to SAS+ values
@@ -213,7 +253,7 @@ def plot_training_curves(
     epochs: int,
     model_type: str,
     encoding_type: str,
-    num_blocks: int,
+    domain_config_name: str,
     output_dir: Path,
 ):
     """
@@ -231,13 +271,13 @@ def plot_training_curves(
     plt.plot(range(1, epochs + 1), train_forecast_losses, label="Train Forecast Loss", linestyle="--")
     plt.plot(range(1, epochs + 1), val_forecast_losses, label="Validation Forecast Loss", linestyle="--")
 
-    plt.title(f"{model_type} Training & Validation Loss (N={num_blocks}, Encoding={encoding_type})")
+    plt.title(f"{model_type} Training & Validation Loss ({domain_config_name}, Encoding={encoding_type})")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.legend()
     plt.grid(True)
 
-    plot_filename = f"training_loss_{model_type}_N{num_blocks}_{encoding_type}.png"
+    plot_filename = f"training_loss_{model_type}_{domain_config_name}_{encoding_type}.png"
     plt.savefig(output_dir / plot_filename)
     plt.close()  # Close the plot to free memory
     print(f"Training loss plot saved to {output_dir / plot_filename}")
@@ -248,7 +288,9 @@ def train_lstm_model_loop(
     train_loader,
     val_loader,
     args,
+    domain_config,
     num_features,
+    config_name,
     model_save_path,
     DEVICE=torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")),
 ):
@@ -280,10 +322,11 @@ def train_lstm_model_loop(
     :param val_loader: Validation DataLoader/iterable with the same batch dictionary format as train_loader. If None, validation is skipped (but scheduler.step will still be called with inf).
     :param args: Configuration with fields (used fields):
         - encoding_type: "sas" or "binary"
-        - num_blocks: int (used for SAS+ clamping / metadata)
+        - num_blocks: int (BlocksWorld: used for SAS+ clamping / metadata)
         - epochs: int
         - learning_rate: float
         - lstm_hidden_size, lstm_num_layers, lstm_dropout_prob, lstm_embedding_dim: training metadata saved in checkpoint
+    :param domain_config: dict (Grippers: used for SAS+ clamping / metadata)
     :param num_features: Number of input features (saved in the checkpoint metadata).
     :param model_save_path: File path where the best model checkpoint dict will be saved via torch.save when validation loss improves.
     :return: None
@@ -328,17 +371,34 @@ def train_lstm_model_loop(
 
             # Safeguard for SAS+ encoding to prevent out-of-bounds embedding errors.
             if args.encoding_type == "sas":
-                max_val = args.num_blocks
-                # Check if any values are out of the expected [0, max_val] range.
-                if not sas_clamp_warning_issued and (torch.any(input_seqs > max_val) or torch.any(goal_states > max_val)):
+                if model.domain == "blocksworld":
+                    max_val = model.num_blocks
+                    min_val = -1  # -1 for 'held', 0 for 'on table', 1..N for 'on block'
+                elif model.domain == "grippers":
+                    max_val = model.num_rooms
+                    # Gripper values are negative, from -1 down to -(2*num_robots)
+                    min_val = -(2 * model.num_robots)
+                else:
+                    raise ValueError(f"Unsupported domain {model.domain} for SAS+ clamping.")
+
+                # Check if any values are out of the expected [min_val, max_val] range.
+                if not sas_clamp_warning_issued and (
+                    torch.any(input_seqs < min_val)
+                    or torch.any(input_seqs > max_val)
+                    or torch.any(goal_states < min_val)
+                    or torch.any(goal_states > max_val)
+                ):
                     warnings.warn(
-                        f"SAS+ input data contains values > num_blocks ({max_val}). "
-                        f"Clamping values to prevent embedding layer errors. "
-                        f"Please check your dataset for correctness."
+                        f"\nTrain batch SAS+ clamping to [{min_val}, {max_val}]"
+                        f"\nInput seqs: {input_seqs}"
+                        f"\nSAS+ input data for domain '{model.domain}' contains values outside expected range [{min_val}, {max_val}]. "
+                        f"\nClamping values to prevent embedding layer errors. "
+                        f"\nPlease check your dataset for correctness."
                     )
                     sas_clamp_warning_issued = True
-                input_seqs.clamp_(min=0, max=max_val)
-                goal_states.clamp_(min=0, max=max_val)
+
+                input_seqs.clamp_(min=min_val, max=max_val)
+                goal_states.clamp_(min=min_val, max=max_val)
 
             optimizer.zero_grad()
             forecasting_logits, _ = model(input_seqs, goal_states, lengths)
@@ -405,6 +465,9 @@ def train_lstm_model_loop(
         epoch_val_loss, epoch_val_forecast_loss = 0.0, 0.0
         num_val_batches = 0
 
+        # min_val, max_val = None, None
+        # if args.encoding_type == "sas":
+
         with torch.no_grad():
             if val_loader is not None:
                 for batch_data in val_loader:
@@ -416,9 +479,23 @@ def train_lstm_model_loop(
                     target_seqs = batch_data["target_sequences"].to(DEVICE)
                     lengths = batch_data["lengths"]
 
+                    # if args.encoding_type == "sas":
+                    #     input_seqs.clamp_(min=0, max=args.num_blocks)
+                    #     goal_states.clamp_(min=0, max=args.num_blocks)
+
                     if args.encoding_type == "sas":
-                        input_seqs.clamp_(min=0, max=args.num_blocks)
-                        goal_states.clamp_(min=0, max=args.num_blocks)
+                        if model.domain == "blocksworld":
+                            max_val = model.num_blocks
+                            min_val = -1
+                        elif model.domain == "grippers":
+                            max_val = model.num_rooms
+                            min_val = -(2 * model.num_robots)
+                        else:
+                            raise ValueError(f"Unsupported domain {model.domain} for SAS+ clamping.")
+
+                        # print(f"DEBUG: Val batch SAS+ clamping to [{min_val}, {max_val}]")
+                        input_seqs.clamp_(min=min_val, max=max_val)
+                        goal_states.clamp_(min=min_val, max=max_val)
 
                     forecasting_logits, _ = model(input_seqs, goal_states, lengths)
 
@@ -492,10 +569,11 @@ def train_lstm_model_loop(
                     "hidden_size": args.lstm_hidden_size,
                     "num_lstm_layers": args.lstm_num_layers,
                     "dropout_prob": args.lstm_dropout_prob,
-                    "target_num_blocks": args.num_blocks,
+                    "domain": args.domain,
+                    "domain_config": domain_config,
                     "embedding_dim": args.lstm_embedding_dim if args.encoding_type == "sas" else None,
                 },
-                model_save_path,
+                str(model_save_path),
             )
             print(f"Model saved to {model_save_path} (Val Loss: {best_val_loss:.4f})")
 
@@ -510,7 +588,7 @@ def train_lstm_model_loop(
         args.epochs,
         args.model_type,
         args.encoding_type,
-        args.num_blocks,
+        config_name,
         model_save_path.parent,  # Pass the directory where the model is saved
     )
 

@@ -6,11 +6,10 @@ import numpy as np
 import torch
 
 
-# ** Abstract Plannable Model **
+# Abstract Plannable Model
 class PlannableModel(ABC):
-    def __init__(self, model_path: Path, num_blocks: int, device: torch.device):
+    def __init__(self, model_path: Path, device: torch.device):
         self.model_path = model_path
-        self.num_blocks = num_blocks
         self.device = device
         self.model: Any = None  # To be initialized by load_model
 

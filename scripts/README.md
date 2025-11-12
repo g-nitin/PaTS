@@ -1,8 +1,5 @@
 ## Workflow and Core Components
 
-> [!WARNING]
-> This README is out-of-date since it doesn't reflect the newer grippers integration.
-
 The typical workflow for using PaTS is:
 
 1.  **Dataset Generation**:

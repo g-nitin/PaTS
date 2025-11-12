@@ -1,15 +1,12 @@
 ## Dataset
 
-> [!WARNING]
-> This README is out-of-date since it doesn't reflect the newer grippers integration.
-
 The dataset for PaTS consists of solved planning problem instances from the Blocksworld domain. Each instance includes the problem definition, the expert plan, and the full state trajectory from the initial state to the goal state.
 
 ### Generation Workflow
 
 The dataset generation process is designed for efficiency and scalability. It follows a multi-stage workflow that separates expensive, encoding-agnostic computations from the lightweight, encoding-specific processing. This ensures that PDDL generation, planning, and validation are performed only **once** per problem, even when generating data for multiple state encodings.
 
-The `data/generate_dataset.sh` script automates this entire pipeline:
+The `data/generate_dataset_bw.sh` (Blocksworld) and `data/generate_dataset_gr.sh` (Grippers) scripts automate this entire pipeline:
 
 1.  **Stage 1: Encoding-Agnostic Generation (The Heavy Lifting)** This initial stage performs computationally intensive tasks that are independent of the final numerical state encoding.
 
@@ -39,7 +36,7 @@ The `data/generate_dataset.sh` script automates this entire pipeline:
 
 The dataset is organized into two distinct top-level directories: `raw_problems` for encoding-agnostic source files and `processed_trajectories` for the final numerical data.
 
-#### `data/raw_problems/<domain_name>/N<num_blocks>/`
+#### `data/raw_problems/<domain_name>/<problem_config_name>/`
 
 This directory contains all the raw, **encoding-agnostic** data. It serves as the foundation for all subsequent encoding steps.
 
@@ -52,7 +49,7 @@ This directory contains all the raw, **encoding-agnostic** data. It serves as th
   - `plan_length_distribution_*.png`: Plots visualizing the plan length distributions.
   - `max_plan_length.txt`: A single integer indicating the maximum plan length found in the dataset for this `num_blocks`.
 
-#### `data/processed_trajectories/<domain_name>/N<num_blocks>/<encoding_type>/`
+#### `data/processed_trajectories/<domain_name>/<problem_config_name>/<encoding_type>/`
 
 This directory contains the final, **encoding-specific** numerical representations of state trajectories and their associated metadata. Each encoding type (`bin`, `sas`, etc.) gets its own subdirectory.
 
@@ -84,6 +81,16 @@ PaTS supports multiple state encoding schemes, controlled by the `--encoding_typ
 - **Example (N=4)**: For the state "b1 on b2, b2 on table, b3 on b4, b4 on table, arm-empty", the encoding is `[2, 0, 4, 0]`.
 - **Size**: Scales linearly with the number of blocks, O(n).
 - **Configuration**: The `encoding_info.json` file, located in the `.../sas/` directory, specifies the type as `sas` and lists the canonical block order used for indexing. No separate manifest file is needed.
+
+#### Grippers SAS+ Encoding (`sas`)
+
+- **Representation**: A dense integer vector of size `num_robots + num_objects`.
+  - **Robot Positions**: The first `num_robots` elements represent the robots. `vector[i]` stores the room number (e.g., `1` for `room1`) where `robot(i+1)` is located.
+  - **Object Positions**: The remaining `num_objects` elements represent the objects.
+    - `vector[num_robots + j] = k > 0`: Object `ball(j+1)` is in room `k`.
+    - `vector[num_robots + j] = v < 0`: Object `ball(j+1)` is held by a gripper, where `v` is a unique negative ID corresponding to a specific gripper (e.g., `-1` for `robot1`'s left gripper).
+- **Example (2 robots, 3 objects)**: For the state "robot1 in room2, robot2 in room1, ball1 in room1, ball2 held by robot1's right gripper (ID -2), ball3 in room2", the encoding could be `[2, 1, 1, -2, 2]`.
+- **Size**: Scales linearly with `num_robots + num_objects`.
 
 ## Note on SAS+ Goal Vector Generation Strategy
 

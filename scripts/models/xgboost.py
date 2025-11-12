@@ -52,14 +52,14 @@ class XGBoostPlanner:
 
     def __init__(
         self,
-        encoding_type="bin",
-        num_blocks: Optional[int] = None,
-        seed=42,
+        encoding_type: str = "bin",
+        domain_config: Optional[dict] = None,
+        seed=13,
         context_window_size: int = 1,
         max_plan_length: Optional[int] = None,
     ):
         self.encoding_type = encoding_type
-        self.num_blocks = num_blocks
+        self.domain_config = domain_config or {}
         self.seed = seed
         self.context_window_size = context_window_size
         self.max_plan_length = max_plan_length
@@ -102,7 +102,7 @@ class XGBoostPlanner:
         save_data = {
             "model": self.model,
             "encoding_type": self.encoding_type,
-            "num_blocks": self.num_blocks,
+            "domain_config": self.domain_config,
             "context_window_size": self.context_window_size,
             "max_plan_length": self.max_plan_length,
         }
@@ -110,20 +110,20 @@ class XGBoostPlanner:
         print(f"XGBoost model saved to {path}")
 
     @classmethod
-    def load(cls, path: Path, encoding_type: str, num_blocks: int, seed: int):
+    def load(cls, path: Path, encoding_type: str, domain_config: dict, seed: int):
         """Loads a model from a file."""
         if not path.is_file():
             raise FileNotFoundError(f"Model file not found at {path}")
         load_data = joblib.load(path)
 
         loaded_encoding_type = load_data.get("encoding_type", encoding_type)
-        loaded_num_blocks = load_data.get("num_blocks", num_blocks)
+        loaded_domain_config = load_data.get("domain_config", domain_config)
         loaded_context_window_size = load_data.get("context_window_size", 1)
         loaded_max_plan_length = load_data.get("max_plan_length")
 
         instance = cls(
             encoding_type=loaded_encoding_type,
-            num_blocks=loaded_num_blocks,
+            domain_config=loaded_domain_config,
             seed=seed,
             context_window_size=loaded_context_window_size,
             max_plan_length=loaded_max_plan_length,

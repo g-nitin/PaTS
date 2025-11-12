@@ -12,10 +12,11 @@ from fastdtw import fastdtw  # type: ignore
 from scipy.spatial.distance import hamming
 
 from .BlocksWorldValidator import BlocksWorldValidator, ValidationResult
+from .GrippersValidator import GrippersValidator
 from .models.llama import LlamaWrapper
 from .models.lstm import PaTS_LSTM
-from .models.ttm import BlocksWorldTTM
 from .models.ttm import ModelConfig as TTMModelConfig
+from .models.ttm import PaTS_TTM
 from .models.xgboost import XGBoostPlanner
 from .PlannableModel import PlannableModel
 
@@ -25,23 +26,25 @@ print(f"Benchmarking using device: {DEVICE}")
 
 
 class TTMWrapper(PlannableModel):
-    def __init__(self, model_path: Path, num_blocks: int, device: torch.device):
-        super().__init__(model_path, num_blocks, device)
-        self.ttm_instance: BlocksWorldTTM
+    def __init__(self, model_path: Path, domain: str, domain_config: dict, device: torch.device):
+        super().__init__(model_path, device)
+        self.ttm_instance: PaTS_TTM
         self.config: TTMModelConfig
+        self.domain = domain
+        self.domain_config = domain_config
 
     def load_model(self):
         print(f"Loading TTM model from: {self.model_path}")
-        self.ttm_instance = BlocksWorldTTM.load(self.model_path, self.device)
-        self.model = self.ttm_instance.model  # The actual torch model
+        self.ttm_instance = PaTS_TTM.load(self.model_path, self.device)
         self.config = self.ttm_instance.config
+        self.model = self.ttm_instance.model  # The actual torch model
         print(
             f"TTM model loaded. Context: {self.config.context_length}, Pred Len: {self.config.prediction_length}, State Dim: {self.config.state_dim}"
         )
 
     def predict_sequence(self, initial_state_np: np.ndarray, goal_state_np: np.ndarray, max_length: int) -> List[List[int]]:
         if self.model is None or self.config is None:
-            raise RuntimeError("TTM model not loaded. Call load_model() first.")
+            raise RuntimeError("TTM model not loaded. Call `load_model()` first.")
 
         self.ttm_instance.model.eval()
         with torch.no_grad():
@@ -105,10 +108,12 @@ class TTMWrapper(PlannableModel):
 
 
 class LSTMWrapper(PlannableModel):
-    def __init__(self, model_path: Path, num_blocks: int, device: torch.device):
-        super().__init__(model_path, num_blocks, device)
+    def __init__(self, model_path: Path, domain: str, domain_config: dict, device: torch.device):
+        super().__init__(model_path, device)
         self.lstm_model: PaTS_LSTM
         self._state_dim: Optional[int] = None  # Will be loaded from checkpoint
+        self.domain = domain
+        self.domain_config = domain_config
 
     def load_model(self):
         if not self.model_path.is_file():
@@ -123,10 +128,11 @@ class LSTMWrapper(PlannableModel):
         num_lstm_layers = checkpoint.get("num_lstm_layers")
         dropout_prob = checkpoint.get("dropout_prob", 0.2)
         encoding_type = checkpoint.get("encoding_type", "bin")  # Default to 'bin' if not found
-        num_blocks = checkpoint.get("target_num_blocks")
         embedding_dim = checkpoint.get("embedding_dim")
-
-        if not all([num_features, hidden_size, num_lstm_layers, num_blocks is not None]):
+        domain = checkpoint.get("domain", "blocksworld")
+        # Ensure domain_config is loaded correctly, providing a default empty dict if not present
+        domain_config = checkpoint.get("domain_config", {})
+        if not all([num_features, hidden_size, num_lstm_layers, domain, domain_config is not None]):
             raise ValueError(
                 "LSTM checkpoint missing required parameters (num_features, hidden_size, num_lstm_layers, target_num_blocks)."
             )
@@ -139,7 +145,8 @@ class LSTMWrapper(PlannableModel):
             num_lstm_layers=num_lstm_layers,
             dropout_prob=dropout_prob,
             encoding_type=encoding_type,
-            num_blocks=num_blocks,
+            domain=domain,
+            domain_config=domain_config,
             embedding_dim=embedding_dim,
         ).to(self.device)
 
@@ -160,13 +167,17 @@ class LSTMWrapper(PlannableModel):
         with torch.no_grad():
             # Create tensors with the correct dtype based on the model's encoding type
             if self.lstm_model.encoding_type == "sas":
-                # For SAS+, the input is integer indices and requires a LongTensor
-                # Safeguard exists to clamp out-of-bounds indices from input files
-                # This mirrors the safeguard in train_model.py and prevents CUDA asserts.
-                # The valid indices are 0 (table) through N (block N), where N = num_blocks.
-                max_valid_index = self.lstm_model.num_blocks
-                initial_state_np.clip(min=0, max=max_valid_index, out=initial_state_np)
-                goal_state_np.clip(min=0, max=max_valid_index, out=goal_state_np)
+                if self.lstm_model.domain == "blocksworld":  # Use model's internal num_blocks
+                    max_val = self.lstm_model.domain_config.get("num_blocks", 0)
+                    min_val = -1
+                elif self.lstm_model.domain == "grippers":  # Use model's internal num_robots/num_rooms
+                    max_val = self.lstm_model.num_rooms
+                    min_val = -(2 * self.lstm_model.num_robots)
+                else:
+                    raise ValueError(f"Unsupported domain {self.lstm_model.domain} for SAS+ clamping in LSTMWrapper.")
+
+                initial_state_np.clip(min=min_val, max=max_val, out=initial_state_np)
+                goal_state_np.clip(min=min_val, max=max_val, out=goal_state_np)
                 current_S_tensor = torch.LongTensor(initial_state_np).unsqueeze(0).to(self.device)
                 goal_S_tensor = torch.LongTensor(goal_state_np).unsqueeze(0).to(self.device)
             else:  # 'bin' encoding
@@ -206,17 +217,20 @@ class XGBoostWrapper(PlannableModel):
     def __init__(
         self,
         model_path: Path,
-        num_blocks: int,
+        domain: str,
+        domain_config: dict,
         device: torch.device,
         encoding_type: str,
         seed: int,
         context_window_size: int = 1,
     ):
-        # XGBoost is CPU-bound, so device is not used but kept for interface consistency
-        super().__init__(model_path, num_blocks, device)
+        super().__init__(model_path, device)
         self.planner: XGBoostPlanner
         self.encoding_type = encoding_type
+        self.domain = domain
+        self.domain_config = domain_config
         self.seed = seed
+
         self.context_window_size = context_window_size
         self._state_dim: Optional[int] = None
         self.loaded_context_window_size: int = (
@@ -226,7 +240,7 @@ class XGBoostWrapper(PlannableModel):
     def load_model(self):
         print(f"Loading XGBoost model from: {self.model_path}")
         self.planner = XGBoostPlanner.load(
-            self.model_path, encoding_type=self.encoding_type, num_blocks=self.num_blocks, seed=self.seed
+            self.model_path, encoding_type=self.encoding_type, domain_config=self.domain_config, seed=self.seed
         )
         # Retrieve context_window_size from loaded model if it was saved with it
         if hasattr(self.planner, "context_window_size"):
@@ -243,8 +257,11 @@ class XGBoostWrapper(PlannableModel):
             total_input_features = self.planner.model.estimators_[0].n_features_in_  # type: ignore
             self._state_dim = total_input_features // (self.loaded_context_window_size + 1)
 
-        elif self.encoding_type == "sas":
-            self._state_dim = self.num_blocks
+        if self.encoding_type == "sas":
+            if self.domain == "blocksworld":
+                self._state_dim = self.domain_config["num_blocks"]
+            elif self.domain == "grippers":
+                self._state_dim = self.domain_config["robots"] + self.domain_config["objects"]
 
         self.model = self.planner.model  # For consistency
         print(
@@ -285,9 +302,17 @@ class XGBoostWrapper(PlannableModel):
         else:
             unpadded_plan_steps = predicted_states
 
-        # Clip the predicted values to the valid SAS+ range [-1, num_blocks]
-        # This prevents the model from predicting impossible positions (e.g., on top of block 6)
-        unpadded_plan_steps = np.clip(unpadded_plan_steps, -1, self.num_blocks)
+        if self.encoding_type == "sas":
+            if self.domain == "blocksworld":
+                max_val = self.domain_config["num_blocks"]
+                min_val = -1
+            elif self.domain == "grippers":
+                max_val = self.domain_config["rooms"]
+                min_val = -(2 * self.domain_config["robots"])
+            else:  # Fallback
+                max_val = 10
+                min_val = -1
+            unpadded_plan_steps = np.clip(unpadded_plan_steps, min_val, max_val)
 
         # 4. Construct the final plan starting with the initial state
         final_plan = [initial_state_np.tolist()]
@@ -390,31 +415,34 @@ def compute_timeseries_metrics(
 def get_plannable_model(
     model_type: str,
     model_path: Path,
-    num_blocks: int,
+    domain: str,
+    domain_config: dict,
     device: torch.device,
     encoding_type: str,
     seed: int,
     context_window_size: int,
+    processed_data_dir: Path,
     dataset_dir: Path,
     llama_use_few_shot: bool = True,
 ) -> PlannableModel:
     """Factory function to get a PlannableModel instance."""
     model_type_lower = model_type.lower()
-    if model_type_lower == "ttm":
-        return TTMWrapper(model_path, num_blocks, device)
-    elif model_type_lower == "lstm":
-        return LSTMWrapper(model_path, num_blocks, device)
+    if model_type_lower == "lstm":
+        return LSTMWrapper(model_path, domain, domain_config, device)
+    elif model_type_lower == "ttm":
+        return TTMWrapper(model_path, domain, domain_config, device)
     elif model_type_lower == "xgboost":
-        return XGBoostWrapper(model_path, num_blocks, device, encoding_type, seed, context_window_size)
+        return XGBoostWrapper(model_path, domain, domain_config, device, encoding_type, seed, context_window_size)
     elif model_type_lower == "llama":
-        # For Llama, model_path is the model_id string.
-        # dataset_dir is needed by LlamaWrapper to fetch a one-shot example.
         return LlamaWrapper(
-            str(model_path), num_blocks, device, encoding_type, dataset_dir, use_few_shot_example=llama_use_few_shot
+            str(model_path),
+            domain_config,
+            device,
+            encoding_type,
+            dataset_dir,
+            processed_data_dir,
+            use_few_shot_example=llama_use_few_shot,
         )
-    # elif model_type_lower == "plansformer":
-    #     # return PlansformerWrapper(model_path, num_blocks, device) # Placeholder
-    #     raise NotImplementedError("Plansformer wrapper not yet implemented.")
     else:
         raise ValueError(f"Unsupported model type for PlannableModel factory: {model_type}")
 
@@ -432,7 +460,7 @@ def plot_benchmark_summary(
     aggregated_metrics: Dict[str, Any],
     model_type: str,
     encoding_type: str,
-    num_blocks: int,
+    domain_config_name: str,
     output_dir: Path,
 ):
     """
@@ -462,7 +490,7 @@ def plot_benchmark_summary(
         color=sns.color_palette("viridis", len(metrics_to_plot)),
     )
     ax.set_ylabel("Value")
-    ax.set_title(f"Benchmark Summary for {model_type} (N={num_blocks}, Encoding={encoding_type})")
+    ax.set_title(f"Benchmark Summary for {model_type} ({domain_config_name}, Encoding={encoding_type})")
     plt.xticks(rotation=45, ha="right")
 
     # Adjust ylim for DTW/Hamming if they are present and large
@@ -474,7 +502,7 @@ def plot_benchmark_summary(
         ax.text(bar.get_x() + bar.get_width() / 2, yval + 0.02, round(yval, 2), ha="center", va="bottom")
 
     plt.tight_layout()
-    plot_filename = f"benchmark_summary_{model_type}_N{num_blocks}_{encoding_type}.png"
+    plot_filename = f"benchmark_summary_{model_type}_{domain_config_name}_{encoding_type}.png"
     plt.savefig(output_dir / plot_filename)
     plt.close()
     print(f"Benchmark summary plot saved to {output_dir / plot_filename}")
@@ -484,7 +512,7 @@ def plot_violation_distribution(
     violation_counts: Dict[str, int],
     model_type: str,
     encoding_type: str,
-    num_blocks: int,
+    domain_config_name: str,
     output_dir: Path,
 ):
     """
@@ -500,10 +528,10 @@ def plot_violation_distribution(
     counts = [item[1] for item in sorted_violations]
 
     plt.figure(figsize=(12, 7))
-    bars = sns.barplot(x=labels, y=counts, palette="rocket")
+    bars = sns.barplot(x=labels, y=counts, hue=labels, palette="rocket", dodge=False, legend=False)
     plt.xlabel("Violation Code")
     plt.ylabel("Count")
-    plt.title(f"Violation Distribution for {model_type} (N={num_blocks}, Encoding={encoding_type})")
+    plt.title(f"Violation Distribution for {model_type} ({domain_config_name}, Encoding={encoding_type})")
     plt.xticks(rotation=45, ha="right")
 
     for bar in bars.patches:
@@ -517,7 +545,7 @@ def plot_violation_distribution(
         )
 
     plt.tight_layout()
-    plot_filename = f"violation_distribution_{model_type}_N{num_blocks}_{encoding_type}.png"
+    plot_filename = f"violation_distribution_{model_type}_{domain_config_name}_{encoding_type}.png"
     plt.savefig(output_dir / plot_filename)
     plt.close()
     print(f"Violation distribution plot saved to {output_dir / plot_filename}")
@@ -528,7 +556,7 @@ def plot_plan_length_histograms(
     expert_lengths: List[int],
     model_type: str,
     encoding_type: str,
-    num_blocks: int,
+    domain_config_name: str,
     output_dir: Path,
 ):
     """
@@ -554,11 +582,12 @@ def plot_plan_length_histograms(
 
     plt.xlabel("Plan Length")
     plt.ylabel("Frequency")
-    plt.title(f"Plan Length Distribution for {model_type} (N={num_blocks}, Encoding={encoding_type})")
+    plt.title(f"Plan Length Distribution for {model_type} ({domain_config_name}, Encoding={encoding_type})")
     plt.legend()
     plt.grid(axis="y", alpha=0.75)
     plt.tight_layout()
-    plot_filename = f"plan_length_histograms_{model_type}_N{num_blocks}_{encoding_type}.png"
+    plot_filename = f"plan_length_histograms_{model_type}_{domain_config_name}_{encoding_type}.png"
+
     plt.savefig(output_dir / plot_filename)
     plt.close()
     print(f"Plan length histograms saved to {output_dir / plot_filename}")
@@ -569,7 +598,7 @@ def plot_timeseries_metrics_histograms(
     hamming_distances: List[float],
     model_type: str,
     encoding_type: str,
-    num_blocks: int,
+    domain_config_name: str,
     output_dir: Path,
 ):
     """
@@ -581,7 +610,7 @@ def plot_timeseries_metrics_histograms(
 
     sns.set_theme()
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle(f"Time-Series Metrics Distribution for {model_type} (N={num_blocks}, Encoding={encoding_type})")
+    fig.suptitle(f"Time-Series Metrics Distribution for {model_type} ({domain_config_name}, Encoding={encoding_type})")
 
     if dtw_distances:
         sns.histplot(dtw_distances, kde=True, color="green", ax=axes[0])
@@ -598,7 +627,7 @@ def plot_timeseries_metrics_histograms(
         axes[1].grid(axis="y", alpha=0.75)
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # type: ignore  # Adjust layout to prevent suptitle overlap
-    plot_filename = f"timeseries_metrics_histograms_{model_type}_N{num_blocks}_{encoding_type}.png"
+    plot_filename = f"timeseries_metrics_histograms_{model_type}_{domain_config_name}_{encoding_type}.png"
     plt.savefig(output_dir / plot_filename)
     plt.close()
     print(f"Time-series metrics histograms saved to {output_dir / plot_filename}")
@@ -610,7 +639,7 @@ def plot_trajectory_comparison(
     expert_plan: np.ndarray,
     problem_basename: str,
     encoding_type: str,
-    num_blocks: int,
+    domain_config_name: str,
     output_dir: Path,
 ):
     """
@@ -625,7 +654,9 @@ def plot_trajectory_comparison(
     # num_features = pred_np.shape[1] if pred_np.shape[0] > 0 else expert_np.shape[1]
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 8), sharey=True)
-    fig.suptitle(f"Trajectory Comparison for {problem_basename} (N={num_blocks}, Encoding={encoding_type})", fontsize=16)
+    fig.suptitle(
+        f"Trajectory Comparison for {problem_basename} ({domain_config_name}, Encoding={encoding_type})", fontsize=16
+    )
 
     if encoding_type == "bin":
         # Heatmap for binary encoding
@@ -642,7 +673,7 @@ def plot_trajectory_comparison(
     elif encoding_type == "sas":
         # Line plot for SAS+ encoding
         # Each line represents a block's position over time
-        for i in range(num_blocks):
+        for i in range(pred_np.shape[1]):
             axes[0].plot(pred_np[:, i], label=f"b{i + 1}")
             axes[1].plot(expert_np[:, i], label=f"b{i + 1}")
 
@@ -650,16 +681,16 @@ def plot_trajectory_comparison(
         axes[0].set_xlabel("Time Step")
         axes[0].set_ylabel("Block Position Value")
         axes[0].legend(loc="upper left", bbox_to_anchor=(1, 1))
-        axes[0].set_ylim(-1.5, num_blocks + 0.5)  # SAS+ values are -1, 0, 1..N
+        axes[0].set_ylim(-1.5, pred_np.shape[1] + 0.5)  # SAS+ values are -1, 0, 1..N
 
         axes[1].set_title("Expert Trajectory (SAS+)")
         axes[1].set_xlabel("Time Step")
         axes[1].set_ylabel("Block Position Value")
         axes[1].legend(loc="upper left", bbox_to_anchor=(1, 1))
-        axes[1].set_ylim(-1.5, num_blocks + 0.5)
+        axes[1].set_ylim(-1.5, pred_np.shape[1] + 0.5)
 
     plt.tight_layout(rect=[0, 0.03, 0.9, 0.95])  # type: ignore # Adjust for suptitle and legends
-    plot_filename = f"trajectory_comparison_{model_type}_N{num_blocks}_{encoding_type}_{problem_basename}.png"
+    plot_filename = f"trajectory_comparison_{model_type}_{domain_config_name}_{encoding_type}_{problem_basename}.png"
     plot_path = output_dir / "trajectory_plots" / plot_filename
     plot_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(plot_path)
@@ -765,15 +796,34 @@ def compute_aggregated_metrics(
     return agg_metrics
 
 
-# ** Main Benchmarking Logic **
+# Main Benchmarking Logic
 def run_benchmark(args: argparse.Namespace):
     raw_block_dir = Path(args.dataset_dir)
-    processed_block_encoding_dir = Path(args.processed_block_encoding_dir)
-    num_blocks = args.num_blocks
+    processed_encoding_dir = Path(args.processed_encoding_dir)
     model_type = args.model_type
     model_path = Path(args.model_path)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    domain_config = {}
+    # Determine a config name for the output directory and plotting
+    if args.domain == "blocksworld":
+        domain_config_name = f"N{args.num_blocks}"
+    elif args.domain == "grippers":
+        domain_config_name = f"R{args.num_robots}-O{args.num_objects}-RM{args.num_rooms}"
+    else:
+        raise ValueError(f"Unknown domain {args.domain}. Cannot determine config name.")
+
+    if args.domain == "blocksworld":
+        domain_config["num_blocks"] = args.num_blocks
+    elif args.domain == "grippers":
+        # For grippers, the config is loaded from encoding_info.json by the validator,
+        # but we still need it for the model wrapper.
+        if not all([args.num_robots, args.num_objects, args.num_rooms]):
+            print("Warning: Grippers config not provided via args. Will be used for model loading if needed.")
+        domain_config["robots"] = args.num_robots
+        domain_config["objects"] = args.num_objects
+        domain_config["rooms"] = args.num_rooms
 
     # Construct paths based on num_blocks
     if not raw_block_dir.exists():
@@ -787,31 +837,48 @@ def run_benchmark(args: argparse.Namespace):
         print(f"No test problems found in {test_split_file}. Exiting.")
         return
 
-    print(f"Found {len(problem_basenames)} test problems for N={num_blocks}.")
+    print(f"Found {len(problem_basenames)} test problems for domain '{args.domain}' with domain_config: {domain_config}")
 
-    # problem_basenames = problem_basenames[:1]
+    # problem_basenames = problem_basenames[:5]
     # print(f"~~Cutting length to {len(problem_basenames)}~~")
 
     # Initialize Validator
-    print(f"Initializing validator for N={num_blocks} with '{args.encoding_type}' encoding.")
+    print(
+        f"Initializing validator for domain '{args.domain}' with config: {domain_config} and '{args.encoding_type}' encoding."
+    )
 
     validator = None
     try:
-        validator = BlocksWorldValidator(num_blocks, args.encoding_type, processed_data_dir=processed_block_encoding_dir)
-        print(f"Validator initialized with state_size={validator.state_size}.")
+        if args.domain == "blocksworld":
+            if args.domain == "blocksworld":
+                validator = BlocksWorldValidator(
+                    args.num_blocks, args.encoding_type, processed_data_dir=processed_encoding_dir
+                )
+            elif args.domain == "grippers":
+                validator = GrippersValidator(args.encoding_type, processed_data_dir=processed_encoding_dir)
+
+        elif args.domain == "grippers":
+            validator = GrippersValidator(args.encoding_type, processed_data_dir=processed_encoding_dir)
+        else:
+            raise ValueError(f"Unsupported domain for validation: {args.domain}")
+
+        if validator is not None:
+            print(f"Validator for '{args.domain}' initialized with state_size={validator.state_size}.")
     except Exception as e:
-        print(f"ERROR: Failed to initialize BlocksWorldValidator: {e}")
+        print(f"ERROR: Failed to initialize Validator: {e}")
         return
 
     try:  # Initialize Model
         wrapped_model: PlannableModel = get_plannable_model(
-            model_type,
-            model_path,
-            num_blocks,
-            DEVICE,
-            args.encoding_type,
-            args.seed,
+            model_type=model_type,
+            model_path=model_path,
+            domain=args.domain,
+            domain_config=domain_config,
+            device=DEVICE,
+            encoding_type=args.encoding_type,
+            seed=args.seed,
             context_window_size=args.xgboost_context_window_size,
+            processed_data_dir=processed_encoding_dir,
             dataset_dir=raw_block_dir,
             llama_use_few_shot=args.llama_use_few_shot,
         )
@@ -825,7 +892,7 @@ def run_benchmark(args: argparse.Namespace):
     wrapped_model.load_model()
 
     # Verify state_dim consistency
-    if wrapped_model.state_dim != validator.state_size:
+    if validator is not None and wrapped_model.state_dim != validator.state_size:
         print("CRITICAL ERROR: State dimension mismatch!")
         print(f"  Model ({wrapped_model.model_name}) expects/produces state_dim = {wrapped_model.state_dim}")
         print(f"  Validator (from manifest/config) expects state_size = {validator.state_size}")
@@ -859,8 +926,8 @@ def run_benchmark(args: argparse.Namespace):
     for i, basename in enumerate(problem_basenames):
         print(f"  Processing problem {i + 1}/{len(problem_basenames)}: {basename} ...", end="", flush=True)
 
-        traj_bin_path = processed_block_encoding_dir / f"{basename}.traj.{args.encoding_type}.npy"
-        goal_bin_path = processed_block_encoding_dir / f"{basename}.goal.{args.encoding_type}.npy"
+        traj_bin_path = processed_encoding_dir / f"{basename}.traj.{args.encoding_type}.npy"
+        goal_bin_path = processed_encoding_dir / f"{basename}.goal.{args.encoding_type}.npy"
 
         if not traj_bin_path.exists() or not goal_bin_path.exists():
             print(" skipped (data files missing).")
@@ -885,7 +952,7 @@ def run_benchmark(args: argparse.Namespace):
 
         # Validate
         validation_res = validator.validate_sequence(predicted_plan_list_of_lists, goal_state_np.tolist())  # type: ignore
-        all_validation_results.append(validation_res)
+        all_validation_results.append(validation_res)  # type: ignore
 
         # Compute and store time-series metrics
         ts_metrics = compute_timeseries_metrics(predicted_plan_list_of_lists, expert_trajectory_np, args.encoding_type)
@@ -906,7 +973,7 @@ def run_benchmark(args: argparse.Namespace):
                     expert_trajectory_np,
                     basename,
                     args.encoding_type,
-                    args.num_blocks,
+                    domain_config_name,
                     output_dir,
                 )
                 solved_problems_plotted_count += 1
@@ -932,7 +999,7 @@ def run_benchmark(args: argparse.Namespace):
         else:
             print(f"  {key}: {value}")
 
-    results_filename = f"benchmark_results_{model_type}_{Path(model_path).stem}_N{num_blocks}.json"
+    results_filename = f"benchmark_results_{model_type}_{Path(model_path).stem}_{domain_config_name}.json"
     results_filepath = output_dir / results_filename
     with open(results_filepath, "w") as f:
         # Convert Counter to dict for JSON
@@ -949,14 +1016,14 @@ def run_benchmark(args: argparse.Namespace):
         aggregated_metrics,
         model_type,
         args.encoding_type,
-        num_blocks,
+        domain_config_name,
         output_dir,
     )
     plot_violation_distribution(
         aggregated_metrics["violation_code_counts"],  # This is already a dict
         model_type,
         args.encoding_type,
-        num_blocks,
+        domain_config_name,
         output_dir,
     )
     plot_plan_length_histograms(
@@ -964,7 +1031,7 @@ def run_benchmark(args: argparse.Namespace):
         all_expert_plan_lengths,
         model_type,
         args.encoding_type,
-        num_blocks,
+        domain_config_name,
         output_dir,
     )
     plot_timeseries_metrics_histograms(
@@ -972,7 +1039,7 @@ def run_benchmark(args: argparse.Namespace):
         all_hamming_distances,
         model_type,
         args.encoding_type,
-        num_blocks,
+        domain_config_name,
         output_dir,
     )
     print("All benchmark plots generated.")
@@ -997,7 +1064,7 @@ def run_benchmark(args: argparse.Namespace):
             }
             detailed_results_list.append(detailed_entry)
 
-        detailed_filename = f"detailed_benchmark_results_{model_type}_{Path(model_path).stem}_N{num_blocks}.json"
+        detailed_filename = f"detailed_benchmark_results_{model_type}_{Path(model_path).stem}_{domain_config_name}.json"
         detailed_filepath = output_dir / detailed_filename
         with open(detailed_filepath, "w") as f_detailed:
             json.dump(detailed_results_list, f_detailed, indent=2)
@@ -1013,17 +1080,22 @@ if __name__ == "__main__":
         help="Path to the raw problem data directory for a specific N (e.g., 'data/raw_problems/blocksworld/N4')",
     )
     parser.add_argument(
-        "--processed_block_encoding_dir",
+        "--processed_encoding_dir",
         type=Path,
         required=True,
-        help="Path to the processed block encoding directory (e.g., 'data/processed_trajectories/blocksworld/N4/bin')",
+        help="Path to the processed encoding directory (e.g., 'data/processed_trajectories/blocksworld/N4/bin')",
     )
     parser.add_argument(
-        "--num_blocks",
-        type=int,
-        required=True,
-        help="Number of blocks for the problems to benchmark.",
+        "--domain",
+        type=str,
+        default="blocksworld",
+        choices=["blocksworld", "grippers"],
+        help="The planning domain.",
     )
+    parser.add_argument("--num_blocks", type=int, help="Number of blocks for BlocksWorld domain.")
+    parser.add_argument("--num-robots", type=int, help="Number of robots for Grippers domain.")
+    parser.add_argument("--num-objects", type=int, help="Number of objects for Grippers domain.")
+    parser.add_argument("--num-rooms", type=int, help="Number of rooms for Grippers domain.")
     parser.add_argument(
         "--model_type",
         type=str,

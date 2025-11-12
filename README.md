@@ -1,8 +1,5 @@
 # Planning as Time-Series (PaTS)
 
-> [!WARNING]
-> This README is out-of-date since it doesn't reflect the newer grippers integration.
-
 > [!NOTE]
 > This is repository is a work in progress.
 
@@ -28,7 +25,7 @@ By treating plan trajectories as multivariate time series, PaTS aims to learn th
 
 This repository provides the complete infrastructure to:
 
-1.  **Generate Datasets**: Create planning problem datasets for the Blocksworld domain with varying complexity.
+1.  **Generate Datasets**: Create planning problem datasets for domains like **Blocksworld** and **Grippers** with varying complexity.
 2.  **Encode States**: Convert symbolic planning states into numerical vectors using either a sparse binary predicate representation (`bin`) or a compact position-based one (`sas`).
 3.  **Train Models**: Train a diverse range of models, including LSTMs, modern MLP-based architectures like TTM, and classical gradient-boosted models like XGBoost.
 4.  **Benchmark Performance**: Rigorously evaluate the generated plans for validity, correctness, and optimality using a dedicated benchmarking script.
@@ -52,7 +49,7 @@ This repository provides the complete infrastructure to:
     uv venv
     uv pip install -r requirements.txt
     ```
-3.  **Install PDDL tools**: Ensure you have [`pddl-generators`](https://github.com/AI-Planning/pddl-generators/tree/main), [`Fast Downward`](https://github.com/aibasel/downward), and [`VAL`](https://github.com/KCL-Planning/VAL) installed and configured. The `data/generate_dataset.sh` script expects these tools to be accessible via the paths specified within the script. Update the `ROOT_DIR` variable in `data/generate_dataset.sh` to point to your planning tools installation.
+3.  **Install PDDL tools**: Ensure you have [`pddl-generators`](https://github.com/AI-Planning/pddl-generators/tree/main), [`Fast Downward`](https://github.com/aibasel/downward), and [`VAL`](https://github.com/KCL-Planning/VAL) installed and configured. The `data/generate_dataset_bw.sh` and `data/generate_dataset_gr.sh` scripts expect these tools to be accessible via the paths specified within the script. Update the `ROOT_DIR` variable in `data/generate_dataset.sh` to point to your planning tools installation.
 
 ## [Dataset Generation & Structure](data/README.md)
 
@@ -66,19 +63,20 @@ A detailed explanation of the workflow, key scripts, and evaluation metrics is a
 
 All commands should be run from the project root directory. We use `uv run python -m` to ensure scripts are executed within the configured virtual environment.
 
-**Note**: Before running, ensure your `data/generate_dataset.sh` script has the correct `ROOT_DIR` pointing to your PDDL tools.
+**Note**: Before running, ensure your `data/generate_dataset_*.sh` scripts have the correct `ROOT_DIR`...
 
 ### 1. Generating the Dataset
 
-First, configure the paths in `data/generate_dataset.sh`. You can also set the desired encoding type (`bin` or `sas`). The script will create a directory like `data/blocks_4-sas/`.
+First, configure the paths in `data/generate_dataset_bw.sh` (for Blocksworld) or `data/generate_dataset_gr.sh` (for Grippers). You can also set the desired encoding type (`bin` or `sas`). The script will create a directory like `data/blocks_4-sas/`.
 
 ```bash
 # Navigate to the data directory
 cd data
 
-# Execute the script for SAS+ encoding
+
+# Execute the script for Blocksworld with SAS+ encoding
 # The script can be modified to change encoding type or other parameters.
-./generate_dataset.sh
+./generate_dataset_bw.sh
 ```
 
 ### 2. Training a Model
@@ -113,6 +111,20 @@ uv run python -m scripts.train_model \
     --output_dir ./training_outputs \
     --seed 13 \
     --xgboost_context_window_size 3
+```
+
+**Example: Training an LSTM for Grippers with SAS+ encoding**
+
+```bash
+uv run python -m scripts.train_model \
+ --model_type lstm \
+ --domain grippers \
+ --dataset_dir data/raw_problems/grippers/R2-O3-RM4 \
+ --processed_block_encoding_dir data/processed_trajectories/grippers/R2-O3-RM4/sas \
+ --num-robots 2 --num-objects 3 --num-rooms 4 \
+ --encoding_type sas \
+ --output_dir ./training_outputs \
+ --epochs 400
 ```
 
 ### 3. Benchmarking a Trained Model

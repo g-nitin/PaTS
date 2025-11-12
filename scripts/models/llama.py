@@ -20,7 +20,7 @@ _llama_model = None
 _llama_tokenizer = None
 
 
-def get_llama_model_and_tokenizer(model_id: str, device: torch.device):
+def get_llama_model_and_tokenizer(model_id: str):
     """
     Loads and caches the Llama model and tokenizer.
     Uses 4-bit quantization if CUDA is available.
@@ -56,47 +56,63 @@ class LlamaWrapper(PlannableModel):
     def __init__(
         self,
         model_id: str,
-        num_blocks: int,
+        domain_config: dict,
         device: torch.device,
         encoding_type: str,
-        dataset_dir: Path,
+        dataset_dir: Path,  # This is raw_data_dir
+        processed_data_dir: Path,
         use_few_shot_example: bool = True,
     ):
         """
         Initializes the LlamaWrapper.
 
         :param model_id: HuggingFace model ID (e.g., "meta-llama/Llama-3.1-8B-Instruct").
-        :param num_blocks: Number of blocks in the Blocksworld domain.
+        :param domain_config: Domain configuration dictionary.
         :param device: The Torch device to run the model on.
         :param encoding_type: The state encoding type ('bin' or 'sas').
         :param dataset_dir: Path to the dataset directory to load a one-shot example.
+        :param processed_data_dir: Path to the processed data directory for the specific encoding.
         """
-        super().__init__(Path(model_id), num_blocks, device)  # model_path for PlannableModel is now model_id
+        super().__init__(Path(model_id), device)  # model_path for PlannableModel is model_id
         self.model_id = model_id
         self.encoding_type = encoding_type
+        self.domain_config = domain_config
         self.state_vec_dim: int = -1  # Will be inferred from dataset
         self.example_initial_state: Optional[np.ndarray] = None
+        self.processed_data_dir = processed_data_dir  # Store it
         self.example_goal_state: Optional[np.ndarray] = None
         self.example_plan_trajectory: Optional[np.ndarray] = None
         self.dataset_dir = dataset_dir  # Path to data/blocks_N/
         self.use_few_shot_example = use_few_shot_example
 
-        # Block names for SAS+ parsing/clamping if needed.
-        self.block_names: List[str] = [f"b{i + 1}" for i in range(self.num_blocks)]
+        # Extract domain-specific parameters from domain_config
+        if self.domain_config.get("num_blocks") is not None:
+            self.num_blocks = self.domain_config["num_blocks"]
+            self.block_names: List[str] = [f"b{i + 1}" for i in range(self.num_blocks)]
+        elif self.domain_config.get("robots") is not None:
+            self.num_robots = self.domain_config["robots"]
+            self.num_objects = self.domain_config["objects"]
+            self.num_rooms = self.domain_config["rooms"]
+        else:
+            raise ValueError("domain_config must contain 'num_blocks' or 'robots/objects/rooms'.")
 
     def load_model(self):
         """
         Loads the Llama model and tokenizer, and prepares the one-shot example.
         """
-        self.model, self.tokenizer = get_llama_model_and_tokenizer(self.model_id, self.device)
+        self.model, self.tokenizer = get_llama_model_and_tokenizer(self.model_id)
 
         # Infer state dimension from dataset regardless of few-shot/zero-shot
+        temp_dataset = None
         try:
             # Use a dummy split file name to just load the first problem for state_dim inference
             # and to get an example problem-solution pair.
             # Using 'train_files.txt' is appropriate as examples should come from training data.
             temp_dataset = PaTSDataset(
-                dataset_dir=self.dataset_dir, split_file_name="train_files.txt", encoding_type=self.encoding_type
+                raw_data_dir=self.dataset_dir,
+                processed_data_dir=self.processed_data_dir,
+                split_file_name="train_files.txt",
+                encoding_type=self.encoding_type,
             )
             self.state_vec_dim = temp_dataset.state_dim
         except Exception as e:
@@ -108,7 +124,7 @@ class LlamaWrapper(PlannableModel):
             raise RuntimeError("Failed to infer state dimension. Please check dataset.")
 
         # Load one-shot example ONLY if use_few_shot_example is True
-        if self.use_few_shot_example:
+        if self.use_few_shot_example and temp_dataset:
             try:
                 if len(temp_dataset) > 0:
                     # Load one example for one-shot inference from the training set.
@@ -120,7 +136,7 @@ class LlamaWrapper(PlannableModel):
                             self.example_goal_state = example_item["goal_state"]
                             self.example_plan_trajectory = example_item["expert_trajectory"]
                             print(
-                                f"Loaded one-shot example from {example_item['id']} (trajectory length: {self.example_plan_trajectory.shape[0]})"
+                                f"Loaded one-shot example from {example_item['id']} (trajectory length: {self.example_plan_trajectory.shape[0]})"  # type: ignore
                             )
                             break
                     if self.example_plan_trajectory is None:
@@ -144,25 +160,35 @@ class LlamaWrapper(PlannableModel):
 
     def _create_dummy_example(self):
         """Creates a minimal dummy example if no real one can be loaded."""
-        print("Creating dummy one-shot example due to data loading issues.")
-        dummy_dim = (
-            self.num_blocks if self.encoding_type == "sas" else (self.num_blocks**2 + self.num_blocks * 3 + 2)
-        )  # Heuristic for one-hot
-        if dummy_dim <= 0:
-            dummy_dim = 10  # Failsafe for very small num_blocks or bad heuristic
+        print("Creating dummy one-shot example due to data loading issues or no suitable example found.")
+
+        if self.encoding_type == "sas":
+            if hasattr(self, "num_blocks"):  # Blocksworld
+                dummy_dim = self.num_blocks
+                dummy_s0 = np.full(dummy_dim, 0, dtype=np.int8)  # All on table
+                dummy_s1 = (
+                    np.array([2] + [0] * (dummy_dim - 1), dtype=np.int8) if dummy_dim >= 1 else np.array([], dtype=np.int8)
+                )  # b1 on b2, others on table
+            elif hasattr(self, "num_robots"):  # Grippers
+                dummy_dim = self.num_robots + self.num_objects
+                dummy_s0 = np.full(dummy_dim, 1, dtype=np.int8)  # All in room1
+                dummy_s1 = (
+                    np.array([1] * self.num_robots + [-1] + [1] * (self.num_objects - 1), dtype=np.int8)
+                    if dummy_dim >= 1
+                    else np.array([], dtype=np.int8)
+                )  # r1 in room1, ball1 held by r1-left
+            else:
+                dummy_dim = 5  # Fallback
+                dummy_s0 = np.zeros(dummy_dim, dtype=np.int8)
+                dummy_s1 = np.ones(dummy_dim, dtype=np.int8)
+        else:  # Binary encoding
+            # A rough heuristic for binary, or use a fixed small number
+            dummy_dim = self.state_vec_dim if self.state_vec_dim > 0 else 20  # Use inferred dim if available, else fallback
+            dummy_s0 = np.zeros(dummy_dim, dtype=np.int8)
+            dummy_s1 = np.ones(dummy_dim, dtype=np.int8)
+            warnings.warn(f"Creating dummy binary example with dimension {dummy_dim}. This may not be valid.")
 
         self.state_vec_dim = dummy_dim
-        # Simple dummy example: S0 -> S1 (arbitrary change)
-        dummy_s0 = np.zeros(dummy_dim, dtype=np.int8)
-        dummy_s1 = np.ones(dummy_dim, dtype=np.int8)
-
-        # Ensure dummy example for SAS+ is valid
-        if self.encoding_type == "sas":
-            dummy_s0 = np.full(dummy_dim, 0, dtype=np.int8)  # All on table
-            if dummy_dim >= 2:
-                dummy_s1 = np.array([2, 0] + [0] * (dummy_dim - 2), dtype=np.int8)  # b1 on b2, others on table
-            else:
-                dummy_s1 = np.ones(dummy_dim, dtype=np.int8) * -1  # held
 
         self.example_initial_state = dummy_s0
         self.example_goal_state = dummy_s1  # Arbitrary goal
@@ -197,10 +223,17 @@ class LlamaWrapper(PlannableModel):
                 return np.array([int(float(p) > 0.5) for p in parts], dtype=np.int8)
             elif self.encoding_type == "sas":
                 # Convert to integer, then clamp values to valid SAS+ range [-1, num_blocks]
-                # -1: held, 0: on table, 1..N: on block 1..N
                 vector = np.array([int(float(p)) for p in parts], dtype=np.int8)
-                max_valid_sas_value = self.num_blocks  # Max block index for SAS+
-                vector = np.clip(vector, -1, max_valid_sas_value)
+                if hasattr(self, "num_blocks"):  # Blocksworld
+                    max_val = self.num_blocks
+                    min_val = -1
+                elif hasattr(self, "num_rooms"):  # Grippers
+                    max_val = self.num_rooms
+                    min_val = -(2 * self.num_robots)
+                else:  # Fallback
+                    max_val = 10
+                    min_val = -1
+                vector = np.clip(vector, min_val, max_val)
                 return vector
             else:
                 return None  # Should not happen, as encoding_type is checked in init
@@ -228,8 +261,10 @@ class LlamaWrapper(PlannableModel):
         current_state_str = self._vector_to_string(initial_state_np)
         goal_state_str = self._vector_to_string(goal_state_np)
 
+        domain_name_for_prompt = "Blocksworld" if hasattr(self, "num_blocks") else "Grippers"
+
         # Base instruction for the AI
-        instruction = 'You are an expert planning AI. Your task is to generate a sequence of states to solve a planning problem in Blocksworld. You operate on numerical state representations. Given an initial state and a goal state, predict ONLY the next state in the plan, in the exact format "[num1 num2 ... numF]". Do not output any other text or explanation.'
+        instruction = f'You are an expert planning AI. Your task is to generate a sequence of states to solve a planning problem in {domain_name_for_prompt}. You operate on numerical state representations. Given an initial state and a goal state, predict ONLY the next state in the plan, in the exact format "[num1 num2 ... numF]". Do not output any other text or explanation.'
 
         # Conditionally add the example for few-shot
         example_section = ""
@@ -260,7 +295,7 @@ INITIAL_STATE: {current_state_str}
 GOAL_STATE: {goal_state_str}
 NEXT_STATE: [/INST]"""
 
-        generated_plan_list_of_lists: List[List[int]] = [initial_state_np.tolist()]
+        generated_plan_list_of_lists: List[List[int]] = [initial_state_np.tolist()]  # type: ignore
 
         for step in range(max_length - 1):  # max_length includes S0, so iterate for max_length-1 steps
             inputs = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True).to(self.device)
@@ -298,7 +333,7 @@ NEXT_STATE: [/INST]"""
 
             # Convert to list for the plan storage
             next_state_list = next_state_np.tolist()
-            generated_plan_list_of_lists.append(next_state_list)
+            generated_plan_list_of_lists.append(next_state_list)  # type: ignore
 
             # Update current state string for the next iteration's prompt
             current_state_str = self._vector_to_string(next_state_np)

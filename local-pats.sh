@@ -1,22 +1,3 @@
-#! /bin/bash
-
-#SBATCH --job-name=PaTS
-#SBATCH -o r_out%j.out
-#SBATCH -e r_err%j.err
-
-#SBATCH --mail-user=niting@email.sc.edu
-#SBATCH --mail-type=ALL
-
-#SBATCH -p v100-16gb-hiprio
-#SBATCH --gres=gpu:1
-
-module load python3/anaconda/2021.07 gcc/12.2.0 cuda/12.1
-source activate /home/niting/miniconda3/envs/pats-env
-
-echo $CONDA_DEFAULT_ENV
-hostname
-echo "Python version: $(python --version)"
-
 domain_name=$1
 encoding=$2
 model_type=$3
@@ -81,7 +62,7 @@ if [ "$model_type" = 'lstm' ]; then
     echo ""
 
     model_path="${output_base_dir}/${model_type}_${PROBLEM_CONFIG_NAME}/pats_lstm_model_${PROBLEM_CONFIG_NAME}.pth"
-    python -m scripts.train_model \
+    uv run python -m scripts.train_model \
         --model_type $model_type \
         --dataset_dir "$RAW_PROBLEM_DIR" \
         --processed_encoding_dir "$PROCESSED_ENCODING_DIR" \
@@ -100,7 +81,7 @@ if [ "$model_type" = 'lstm' ]; then
     echo "Starting benchmarking with model: $model_type. Log in ${benchmark_log_file}."
     echo ""
 
-    python -m scripts.benchmark \
+    uv run python -m scripts.benchmark \
         --dataset_dir "$RAW_PROBLEM_DIR" \
         --processed_encoding_dir "$PROCESSED_ENCODING_DIR" \
         --domain "$domain_name" \
@@ -120,7 +101,7 @@ elif [ "$model_type" = 'ttm' ]; then
     model_path="${output_base_dir}/${model_type}_${PROBLEM_CONFIG_NAME}/final_model_assets"
     echo ""
 
-    python -m scripts.train_model \
+    uv run python -m scripts.train_model \
         --model_type $model_type \
         --dataset_dir "$RAW_PROBLEM_DIR" \
         --processed_encoding_dir "$PROCESSED_ENCODING_DIR" \
@@ -139,7 +120,7 @@ elif [ "$model_type" = 'ttm' ]; then
     echo "Starting benchmarking with model: $model_type. Log: ${benchmark_log_file}."
     echo ""
 
-    python -m scripts.benchmark \
+    uv run python -m scripts.benchmark \
         --dataset_dir "$RAW_PROBLEM_DIR" \
         --processed_encoding_dir "$PROCESSED_ENCODING_DIR" \
         --domain "$domain_name" \
@@ -159,7 +140,7 @@ elif [ "$model_type" = 'xgboost' ]; then
     model_path="${output_base_dir}/${model_type}_${PROBLEM_CONFIG_NAME}/pats_xgboost_model_${PROBLEM_CONFIG_NAME}.joblib"
     echo ""
 
-    python -m scripts.train_model \
+    uv run python -m scripts.train_model \
         --model_type $model_type \
         --dataset_dir "$RAW_PROBLEM_DIR" \
         --processed_encoding_dir "$PROCESSED_ENCODING_DIR" \
@@ -178,7 +159,7 @@ elif [ "$model_type" = 'xgboost' ]; then
     echo "Training completed. Outputs in ${output_base_dir}. Log in ${train_log_file}."
     echo "Starting benchmarking with model: $model_type. Log: ${benchmark_log_file}."
     echo ""
-    python -m scripts.benchmark \
+    uv run python -m scripts.benchmark \
         --dataset_dir "$RAW_PROBLEM_DIR" \
         --processed_encoding_dir "$PROCESSED_ENCODING_DIR" \
         --domain "$domain_name" \
@@ -210,7 +191,7 @@ elif [ "$model_type" = 'llama' ]; then
     echo "Log: ${zero_shot_benchmark_log_file}."
 
     # --llama_use_few_shot is NOT present for zero-shot
-    python -m scripts.benchmark \
+    uv run python -m scripts.benchmark \
         --dataset_dir "$RAW_PROBLEM_DIR" \
         --processed_encoding_dir "$PROCESSED_ENCODING_DIR" \
         --domain "$domain_name" \
@@ -234,7 +215,7 @@ elif [ "$model_type" = 'llama' ]; then
     few_shot_benchmark_log_file="${few_shot_benchmark_output_dir}/benchmark_${model_type}_${PROBLEM_CONFIG_NAME}_${encoding}_few_shot.log"
     echo "Log: ${few_shot_benchmark_log_file}."
 
-    python -m scripts.benchmark \
+    uv run python -m scripts.benchmark \
         --dataset_dir "$RAW_PROBLEM_DIR" \
         --processed_encoding_dir "$PROCESSED_ENCODING_DIR" \
         --domain "$domain_name" \

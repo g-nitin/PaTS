@@ -69,7 +69,7 @@ class ModelConfig:
     seed: int
     state_dim: Optional[int] = None
     encoding_type: str = "bin"  # Specifies the encoding used (e.g., 'bin', 'sas')
-    num_blocks: Optional[int] = None  # Number of blocks, relevant for SAS+ validation
+    domain_config: Optional[dict] = None  # Domain-specific config, e.g., num_blocks, num_robots, etc.
 
 
 class TTMDataCollator:
@@ -203,7 +203,7 @@ class TTMDataCollator:
 
 
 # ** Model Class **
-class BlocksWorldTTM:
+class PaTS_TTM:
     def __init__(self, model_config: ModelConfig, device: torch.device, output_dir: PosixPath | Path):
         self.config = model_config
         self.device: torch.device = device
@@ -221,8 +221,8 @@ class BlocksWorldTTM:
                 f"ModelConfig encoding_type ({self.config.encoding_type}) differs from train_dataset encoding_type ({train_dataset.encoding_type}). Using dataset's type."
             )
             self.config.encoding_type = train_dataset.encoding_type
-        if self.config.encoding_type == "sas" and self.config.num_blocks is None:
-            raise ValueError("For SAS+ encoding, num_blocks must be provided in ModelConfig.")
+        if self.config.encoding_type == "sas" and self.config.domain_config is None:
+            raise ValueError("For SAS+ encoding, domain_config must be provided in ModelConfig.")
 
     def train(
         self,
@@ -321,8 +321,8 @@ class BlocksWorldTTM:
         if self.config.state_dim is None:
             raise RuntimeError("Model config state_dim is not set.")
 
-        if self.config.encoding_type == "sas" and self.config.num_blocks is None:
-            raise ValueError("num_blocks must be set in ModelConfig for SAS+ encoding prediction.")
+        if self.config.encoding_type == "sas" and self.config.domain_config is None:
+            raise ValueError("domain_config must be set in ModelConfig for SAS+ encoding prediction.")
 
         self.model.eval()
         with torch.no_grad():
@@ -367,9 +367,18 @@ class BlocksWorldTTM:
                 # Binarize the *unscaled* predictions
                 final_predictions = (unscaled_predictions > 0.5).float()
             elif self.config.encoding_type == "sas":
-                # Round and clamp the *unscaled* predictions
-                max_valid_sas_value = self.config.num_blocks
-                final_predictions = torch.round(unscaled_predictions).clamp(min=-1, max=max_valid_sas_value).long()
+                if not isinstance(self.config.domain_config, dict):
+                    raise ValueError("domain_config must be set for SAS+ prediction.")
+
+                if self.config.domain_config.get("num_blocks") is not None:  # Blocksworld
+                    max_val = self.config.domain_config["num_blocks"]
+                    min_val = -1
+                elif self.config.domain_config.get("rooms") is not None:  # Grippers
+                    max_val = self.config.domain_config["rooms"]
+                    min_val = -(2 * self.config.domain_config["robots"])
+                else:
+                    raise ValueError("Unsupported domain in domain_config for SAS+ clamping.")
+                final_predictions = torch.round(unscaled_predictions).clamp(min=min_val, max=max_val).long()
             else:
                 raise ValueError(f"Unsupported encoding type: {self.config.encoding_type}")
 
@@ -391,7 +400,7 @@ class BlocksWorldTTM:
         print(f"Model and config saved to {path}")
 
     @classmethod
-    def load(cls, path: Path, device: torch.device) -> "BlocksWorldTTM":
+    def load(cls, path: Path, device: torch.device) -> "PaTS_TTM":
         """Load model weights and configuration"""
         print(f"Loading model from {path}")
         config_path = path / "config.json"
@@ -403,7 +412,7 @@ class BlocksWorldTTM:
 
         # Add default values for new fields if loading an old config (for backward compatibility)
         config_dict.setdefault("encoding_type", "bin")
-        config_dict.setdefault("num_blocks", None)
+        config_dict.setdefault("domain_config", None)
 
         # Ensure all required fields for ModelConfig are present
         try:
@@ -415,8 +424,8 @@ class BlocksWorldTTM:
 
         if loaded_model_config.state_dim is None:
             raise ValueError("Loaded model config must contain 'state_dim'.")
-        if loaded_model_config.encoding_type == "sas" and loaded_model_config.num_blocks is None:
-            raise ValueError("Loaded model config for SAS+ must contain 'num_blocks'.")
+        if loaded_model_config.encoding_type == "sas" and loaded_model_config.domain_config is None:
+            raise ValueError("Loaded model config for SAS+ must contain 'domain_config'.")
 
         instance = cls(model_config=loaded_model_config, device=device, output_dir=path)
 

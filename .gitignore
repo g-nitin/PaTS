@@ -2,6 +2,8 @@
 **/*.pyc
 .vscode/
 
+wlplan/
+
 data/processed_trajectories/
 data/raw_problems/
 data/*.zip

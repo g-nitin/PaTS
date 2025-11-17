@@ -9,13 +9,18 @@ from pprint import pprint
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+from torch_geometric.loader import DataLoader as GraphDataLoader
 from transformers.trainer_utils import set_seed as ttm_set_seed
 
+from scripts.BlocksWorldValidator import BlocksWorldValidator
+from scripts.GrippersValidator import GrippersValidator
+from scripts.models.gnn import PaTS_GNN, train_gnn_model_loop
 from scripts.models.lstm import PaTS_LSTM, lstm_collate_fn, train_lstm_model_loop
 from scripts.models.ttm import ModelConfig as TTMModelConfig
 from scripts.models.ttm import PaTS_TTM, determine_ttm_model
 from scripts.models.xgboost import XGBoostPlanner, prepare_data_for_xgboost
 from scripts.pats_dataset import PaTSDataset
+from scripts.pats_graph_dataset import PaTSGraphDataset
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
 
@@ -29,7 +34,7 @@ def main():
         "--model_type",
         type=str,
         required=True,
-        choices=["lstm", "ttm", "xgboost"],
+        choices=["lstm", "ttm", "xgboost", "gnn"],
         help="Type of model to train.",
     )
     parser.add_argument(
@@ -165,6 +170,12 @@ def main():
         default=1,
         help="Number of past states to include in XGBoost input features. Default is 1 (current state only).",
     )
+
+    # GNN-specific arguments
+    parser.add_argument("--gnn_embedding_dim", type=int, default=64, help="Embedding dimension for GNN.")
+    parser.add_argument("--gnn_layers", type=int, default=4, help="Number of layers in GNN encoder.")
+    parser.add_argument("--latent_loss_weight", type=float, default=1.0, help="Weight for latent space MSE loss.")
+    parser.add_argument("--reconstruction_loss_weight", type=float, default=0.5, help="Weight for reconstruction BCE loss.")
 
     args = parser.parse_args()
 
@@ -346,6 +357,67 @@ def main():
         final_model_assets_path = model_specific_output_dir / "final_model_assets"
         ttm_trainer_instance.save(final_model_assets_path)
         print("TTM Training finished.")
+
+    elif args.model_type == "gnn":
+        print("\nStarting GNN training setup...")
+
+        # The GNN needs the PDDL domain file
+        pddl_domain_file = args.dataset_dir.parent.parent / f"{args.domain}/domain.pddl"
+        if not pddl_domain_file.exists():
+            sys.exit(f"ERROR: PDDL domain file not found at {pddl_domain_file}")
+
+        # The GNN decoder needs to know the output dimension of the one-hot vector.
+        # We instantiate the correct validator based on the domain to get this.
+        if args.domain == "blocksworld":
+            validator_for_dim = BlocksWorldValidator(args.num_blocks, "bin", args.processed_encoding_dir)
+        elif args.domain == "grippers":
+            validator_for_dim = GrippersValidator("bin", args.processed_encoding_dir)
+        else:
+            sys.exit(f"Unsupported domain for GNN validator: {args.domain}")
+        one_hot_state_dim = validator_for_dim.state_size
+
+        # Datasets and Dataloaders
+        train_graph_dataset = PaTSGraphDataset(
+            args.dataset_dir, args.processed_encoding_dir, pddl_domain_file, "train_files.txt"
+        )
+        val_graph_dataset = PaTSGraphDataset(
+            args.dataset_dir, args.processed_encoding_dir, pddl_domain_file, "val_files.txt"
+        )
+
+        # Custom collate function for the graph dataloader
+        def collate_graphs(data_list):
+            return {
+                "expert_graphs": [item["expert_graphs"] for item in data_list],
+                "one_hot_trajectory": [item["one_hot_trajectory"] for item in data_list],
+                "id": [item["id"] for item in data_list],
+            }
+
+        train_loader = GraphDataLoader(
+            train_graph_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_graphs
+        )
+        val_loader = GraphDataLoader(
+            val_graph_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_graphs
+        )
+
+        # Model
+        model = PaTS_GNN(
+            gnn_in_features=train_graph_dataset.graph_generator.get_n_features(),
+            gnn_n_relations=train_graph_dataset.graph_generator.get_n_relations(),
+            one_hot_state_dim=one_hot_state_dim,
+            gnn_embedding_dim=args.gnn_embedding_dim,
+            lstm_hidden_size=args.lstm_hidden_size,
+            num_lstm_layers=args.lstm_num_layers,
+        ).to(DEVICE)
+
+        print(model)
+        total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Total trainable GNN parameters: {total_params}")
+
+        gnn_model_save_path = model_specific_output_dir / f"pats_gnn_model_{config_name}.pth"
+
+        train_gnn_model_loop(
+            model, train_loader, val_loader, args, one_hot_state_dim, config_name, gnn_model_save_path, DEVICE
+        )
 
     else:
         print(f"Unknown model type: {args.model_type}")

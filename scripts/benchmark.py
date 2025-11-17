@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -10,6 +11,9 @@ import seaborn as sns
 import torch
 from fastdtw import fastdtw  # type: ignore
 from scipy.spatial.distance import hamming
+
+from scripts.models.gnn import PaTS_GNN
+from scripts.pats_graph_dataset import PaTSGraphDataset  # For wlplan setup
 
 from .BlocksWorldValidator import BlocksWorldValidator, ValidationResult
 from .GrippersValidator import GrippersValidator
@@ -332,6 +336,118 @@ class XGBoostWrapper(PlannableModel):
         return self._state_dim
 
 
+class GNNWrapper(PlannableModel):
+    def __init__(
+        self,
+        model_path: Path,
+        domain: str,
+        domain_config: dict,
+        device: torch.device,
+        dataset_dir: Path,
+        processed_encoding_dir: Path,
+    ):
+        super().__init__(model_path, device)
+        self.domain = domain
+        self.domain_config = domain_config
+        self.dataset_dir = dataset_dir
+        self.processed_encoding_dir = processed_encoding_dir
+        self.model: PaTS_GNN
+        self._state_dim: Optional[int] = None
+
+        # Setup wlplan components for converting states to graphs
+        pddl_domain_file = self.dataset_dir.parent.parent / f"{self.domain}/domain.pddl"
+        if not pddl_domain_file.exists():
+            sys.exit(f"ERROR: PDDL domain file not found at {pddl_domain_file}")
+
+        self.graph_helper = PaTSGraphDataset(
+            self.dataset_dir, self.processed_encoding_dir, pddl_domain_file, "train_files.txt"
+        )
+
+        # Instantiate the correct validator for one-hot to text conversion
+        if self.domain == "blocksworld":
+            self.validator_for_text = BlocksWorldValidator(
+                self.domain_config["num_blocks"], "bin", self.processed_encoding_dir
+            )
+        elif self.domain == "grippers":
+            self.validator_for_text = GrippersValidator("bin", self.processed_encoding_dir)
+        else:
+            raise ValueError(f"Unsupported domain for GNNWrapper: {self.domain}")
+
+    def load_model(self):
+        checkpoint = torch.load(self.model_path, map_location=self.device)
+        self.model = PaTS_GNN(
+            gnn_in_features=checkpoint["gnn_in_features"],
+            gnn_n_relations=checkpoint["gnn_n_relations"],
+            one_hot_state_dim=checkpoint["one_hot_state_dim"],
+            gnn_embedding_dim=checkpoint["gnn_embedding_dim"],
+            lstm_hidden_size=checkpoint["lstm_hidden_size"],
+            num_lstm_layers=checkpoint["num_lstm_layers"],
+        ).to(self.device)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.model.eval()
+        self._state_dim = checkpoint["one_hot_state_dim"]
+        print("GNN model loaded.")
+
+    def _pddl_text_to_graph(self, text_state: str):
+        wl_state = self.graph_helper._text_state_to_wlplan_state(text_state)
+        wl_graph = self.graph_helper.graph_generator.to_graph(wl_state)
+        return self.graph_helper._wlplan_graph_to_pyg(wl_graph)
+
+    def _one_hot_to_pddl_text(self, one_hot_vector: np.ndarray) -> str:
+        """Converts a one-hot vector back to a text predicate string using the validator."""
+        true_indices = np.where(one_hot_vector == 1)[0]
+        predicates = [self.validator_for_text.predicate_list[i] for i in true_indices]
+        return " ".join(predicates)
+
+    def predict_sequence(self, initial_state_np: np.ndarray, goal_state_np: np.ndarray, max_length: int) -> List[List[int]]:
+        initial_state_text = self._one_hot_to_pddl_text(initial_state_np)
+        goal_state_text = self._one_hot_to_pddl_text(goal_state_np)
+
+        initial_graph = self._pddl_text_to_graph(initial_state_text).to(self.device)
+        goal_graph = self._pddl_text_to_graph(goal_state_text).to(self.device)
+
+        with torch.no_grad():
+            initial_embedding = self.model.encoder(initial_graph)
+            goal_embedding = self.model.encoder(goal_graph)
+
+            current_embedding = initial_embedding
+            h_prev = torch.zeros(self.model.lstm.num_layers, 1, self.model.lstm.hidden_size).to(self.device)
+            c_prev = torch.zeros(self.model.lstm.num_layers, 1, self.model.lstm.hidden_size).to(self.device)
+
+            generated_plan_vectors = [initial_state_np.tolist()]
+
+            for _ in range(max_length - 1):
+                lstm_input = torch.cat([current_embedding, goal_embedding], dim=1).unsqueeze(1)
+                lstm_out, (h_next, c_next) = self.model.lstm(lstm_input, (h_prev, c_prev))
+
+                next_embedding = self.model.forecasting_head(lstm_out.squeeze(1))
+
+                next_state_logits = self.model.decoder(next_embedding)
+                next_state_vector = (torch.sigmoid(next_state_logits) > 0.5).int().cpu().numpy().flatten()
+
+                generated_plan_vectors.append(next_state_vector.tolist())
+
+                if np.array_equal(next_state_vector, generated_plan_vectors[-2]):  # Stagnation check
+                    break
+                if np.array_equal(next_state_vector, goal_state_np):
+                    break
+
+                current_embedding = next_embedding
+                h_prev, c_prev = h_next, c_next
+
+        return generated_plan_vectors
+
+    @property
+    def model_name(self) -> str:
+        return "PaTS_GNN"
+
+    @property
+    def state_dim(self) -> int:
+        if self._state_dim is None:
+            raise ValueError("GNN model not loaded or state_dim not set.")
+        return self._state_dim
+
+
 def compute_timeseries_metrics(
     predicted_plan: List[List[int]], expert_plan: np.ndarray, encoding_type: str
 ) -> Dict[str, float]:
@@ -433,6 +549,8 @@ def get_plannable_model(
         return TTMWrapper(model_path, domain, domain_config, device)
     elif model_type_lower == "xgboost":
         return XGBoostWrapper(model_path, domain, domain_config, device, encoding_type, seed, context_window_size)
+    elif model_type_lower == "gnn":
+        return GNNWrapper(model_path, domain, domain_config, device, dataset_dir, processed_data_dir)
     elif model_type_lower == "llama":
         return LlamaWrapper(
             str(model_path),
@@ -1100,7 +1218,7 @@ if __name__ == "__main__":
         "--model_type",
         type=str,
         required=True,
-        choices=["ttm", "lstm", "xgboost", "llama"],
+        choices=["ttm", "lstm", "xgboost", "llama", "gnn"],
         help="Type of model to benchmark.",
     )
     parser.add_argument(
